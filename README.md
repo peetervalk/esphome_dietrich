@@ -1,7 +1,7 @@
-# Dietrich (Remeha) Boiler connectivity using ESP8266 with ESPHOME
+# Dietrich (Remeha) Boiler connectivity using ESP8266 / ESP32 with ESPHOME
 
 Native ESPHome **external component** for reading data from De Dietrich (or Remeha) PC interface, tested with model mcr3.
-For this we use an ESP8266 (Wemos D1) with ESPHOME software - sample YAML files are in English and Polish.
+Works on both **ESP8266** (e.g. Wemos D1) and **ESP32** (e.g. DevKit V4) boards with ESPHOME software - sample YAML files are in English and Polish.
 
 ## Usage
 
@@ -59,7 +59,7 @@ ESPHome ≤ 2025.1 with the old `platform: custom` mechanism.
 
 It connects to the boiler using a 4P4C (RJ10) connector with the following pinouts:
 ```
- Heater Board from top       ESP8266
+ Heater Board from top       ESP8266 / ESP32
     4P4C RJ connector
     
        +---------+
