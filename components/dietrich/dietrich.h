@@ -108,6 +108,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   bool frame_valid_(const uint8_t *response, size_t n) const;
   static bool is_valid_crc_(const uint8_t *response, size_t n);
   static float signed_float_(float value);
+  static float temp_or_nan_(uint16_t raw);
   static std::string hex_str_(const uint8_t *data, size_t len);
 
   DietrichVariant variant_{DIETRICH_VARIANT_MCR3};

@@ -1,4 +1,5 @@
 #include "dietrich.h"
+#include <cmath>
 #include <cstring>
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -20,6 +21,14 @@ float Dietrich::signed_float_(float value) {
   if (value > 32768)
     value -= 65536;
   return value;
+}
+
+// A disconnected (open) temperature sensor input reads as 0x8000, which would
+// scale to 327.68 degC - publish NAN instead so Home Assistant shows "unknown"
+float Dietrich::temp_or_nan_(uint16_t raw) {
+  if (raw == 0x8000)
+    return NAN;
+  return signed_float_(raw) * 0.01f;
 }
 
 std::string Dietrich::hex_str_(const uint8_t *data, size_t len) {
@@ -98,13 +107,13 @@ void Dietrich::get_sample_() {
   if (this->frame_valid_(readdata, n)) {
     uint8_t bits = 0;
 
-    this->publish_(this->flow_temp_sensor_, signed_float_((readdata[8 + o] * 256) + readdata[7 + o]) * 0.01f);
-    this->publish_(this->return_temp_sensor_, signed_float_((readdata[10 + o] * 256) + readdata[9 + o]) * 0.01f);
-    this->publish_(this->dhw_in_temp_sensor_, signed_float_((readdata[12 + o] * 256) + readdata[11 + o]) * 0.01f);
-    this->publish_(this->outside_temp_sensor_, signed_float_((readdata[14 + o] * 256) + readdata[13 + o]) * 0.01f);
-    this->publish_(this->calorifier_temp_sensor_, signed_float_((readdata[16 + o] * 256) + readdata[15 + o]) * 0.01f);
-    this->publish_(this->boiler_control_temp_sensor_, signed_float_((readdata[20 + o] * 256) + readdata[19 + o]) * 0.01f);
-    this->publish_(this->room_temp_sensor_, signed_float_((readdata[22 + o] * 256) + readdata[21 + o]) * 0.01f);
+    this->publish_(this->flow_temp_sensor_, temp_or_nan_((readdata[8 + o] * 256) + readdata[7 + o]));
+    this->publish_(this->return_temp_sensor_, temp_or_nan_((readdata[10 + o] * 256) + readdata[9 + o]));
+    this->publish_(this->dhw_in_temp_sensor_, temp_or_nan_((readdata[12 + o] * 256) + readdata[11 + o]));
+    this->publish_(this->outside_temp_sensor_, temp_or_nan_((readdata[14 + o] * 256) + readdata[13 + o]));
+    this->publish_(this->calorifier_temp_sensor_, temp_or_nan_((readdata[16 + o] * 256) + readdata[15 + o]));
+    this->publish_(this->boiler_control_temp_sensor_, temp_or_nan_((readdata[20 + o] * 256) + readdata[19 + o]));
+    this->publish_(this->room_temp_sensor_, temp_or_nan_((readdata[22 + o] * 256) + readdata[21 + o]));
     this->publish_(this->ch_setpoint_sensor_, signed_float_((readdata[24 + o] * 256) + readdata[23 + o]) * 0.01f);
     this->publish_(this->dhw_setpoint_sensor_, signed_float_((readdata[26 + o] * 256) + readdata[25 + o]) * 0.01f);
     this->publish_(this->room_temp_setpoint_sensor_, signed_float_((readdata[28 + o] * 256) + readdata[27 + o]) * 0.01f);
@@ -112,7 +121,7 @@ void Dietrich::get_sample_() {
     if (this->read_all_) {
       this->publish_(this->fan_speed_setpoint_sensor_, signed_float_((readdata[30 + o] * 256) + readdata[29 + o]));
       this->publish_(this->fan_speed_sensor_, signed_float_((readdata[32 + o] * 256) + readdata[31 + o]));
-      this->publish_(this->ionisation_current_sensor_, readdata[33 + o]);
+      this->publish_(this->ionisation_current_sensor_, readdata[33 + o] * 0.1f);
       this->publish_(this->internal_setpoint_sensor_, signed_float_((readdata[35 + o] * 256) + readdata[34 + o]) * 0.01f);
       this->publish_(this->available_power_sensor_, readdata[36 + o]);
       this->publish_(this->pump_percentage_sensor_, readdata[37 + o]);
@@ -159,12 +168,12 @@ void Dietrich::get_sample_() {
     this->publish_(this->sub_state_sensor_, readdata[50 + o], 200);
 
     if (this->read_all_) {
-      this->publish_(this->hydro_pressure_sensor_, readdata[56]);
+      this->publish_(this->hydro_pressure_sensor_, readdata[56] * 0.1f);
 
       bits = readdata[57];
       this->publish_(this->hru_sensor_, (bits >> 1) & 1);
 
-      this->publish_(this->control_temp_sensor_, signed_float_((readdata[59] * 256) + readdata[58]) * 0.01f);
+      this->publish_(this->control_temp_sensor_, temp_or_nan_((readdata[59] * 256) + readdata[58]));
       this->publish_(this->dhw_flowrate_sensor_, signed_float_((readdata[61] * 256) + readdata[60]) * 0.01f);
     }
 
