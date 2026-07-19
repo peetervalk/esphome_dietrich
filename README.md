@@ -1,8 +1,50 @@
 # Dietrich (Remeha) Boiler connectivity using ESP8266 with ESPHOME
 
-Library for reading data from De Dietrich (or Remeha) PC interface, tested with model mcr3.
+Native ESPHome **external component** for reading data from De Dietrich (or Remeha) PC interface, tested with model mcr3.
 For this we use an ESP8266 (Wemos D1) with ESPHOME software - sample YAML files are in English and Polish.
 
+## Usage
+
+Since ESPHome 2025.2 the old `platform: custom` + `includes:` mechanism is removed, so this
+project is now a proper external component. Add it to your YAML:
+
+```yaml
+external_components:
+  - source: github://kakaki/esphome_dietrich
+    components: [ dietrich ]
+
+uart:
+  id: uart_bus
+  baud_rate: 9600
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+
+dietrich:
+  uart_id: uart_bus
+  update_interval: 15s
+  # variant: calenta_v1_p5   # for Calenta / MCX Plus / Avanta V1_P5 (default: mcr3)
+  flow_temp:
+    name: "Boiler flow temp"
+  # ... see the example YAML files for the full sensor list
+```
+
+Full examples:
+
+| File | Language | Protocol variant |
+|---|---|---|
+| [dietrich_en.yaml](dietrich_en.yaml) | English | `mcr3` (default) |
+| [dietrich_pl.yaml](dietrich_pl.yaml) | Polish | `mcr3` (default) |
+| [dietrich_calenta_v1_p5_en.yaml](dietrich_calenta_v1_p5_en.yaml) | English | `calenta_v1_p5` |
+| [dietrich_calenta_v1_p5_pl.yaml](dietrich_calenta_v1_p5_pl.yaml) | Polish | `calenta_v1_p5` |
+
+The component source lives in [components/dietrich](components/dietrich). Compared to the
+legacy custom component it also validates every response frame with CRC16 (`mcr3` variant)
+before publishing any values.
+
+The legacy header files `dietrich.h` and `dietrich_calentaV1_P5.h` are kept for users of
+ESPHome ≤ 2025.1 with the old `platform: custom` mechanism.
+
+## Hardware
 
 It connects to the boiler using a 4P4C (RJ10) connector with the following pinouts:
 ```
@@ -28,4 +70,16 @@ And in printed box.
 
 ![Screenshot](box.jpg)
 
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
+GPL-3.0 is used to ensure any derivative work remains open source.
+
+## Credits
+
 Thanks to great work from https://github.com/rjblake/remeha - for creating maping of data in excel file.
+
+The rewrite of the original custom component into a native ESPHome external component
+(the C++ and Python code in [components/dietrich](components/dietrich), including CRC16
+frame validation and the `calenta_v1_p5` variant support) was done with the help of
+Claude (Anthropic), based on the original protocol logic in this repository.

@@ -1,5 +1,5 @@
 esphome:
-  name: uart_dietrich
+  name: uart_dietrich_calenta
 
 esp8266:
   board: d1_mini
@@ -45,8 +45,8 @@ text_sensor:
 dietrich:
   uart_id: uart_bus
   update_interval: 15s
-  # protocol variant: mcr3 (default). For Calenta / MCX Plus / Avanta V1_P5
-  # use the dietrich_calenta_v1_p5_en.yaml example (variant: calenta_v1_p5)
+  # protocol variant for Calenta / MCX Plus / Avanta V1_P5
+  variant: calenta_v1_p5
 
   state:
     id: dietrich_state
