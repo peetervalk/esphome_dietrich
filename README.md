@@ -30,12 +30,23 @@ dietrich:
 
 Full examples:
 
-| File | Language | Protocol variant |
-|---|---|---|
-| [dietrich_en.yaml](dietrich_en.yaml) | English | `mcr3` (default) |
-| [dietrich_pl.yaml](dietrich_pl.yaml) | Polish | `mcr3` (default) |
-| [dietrich_calenta_v1_p5_en.yaml](dietrich_calenta_v1_p5_en.yaml) | English | `calenta_v1_p5` |
-| [dietrich_calenta_v1_p5_pl.yaml](dietrich_calenta_v1_p5_pl.yaml) | Polish | `calenta_v1_p5` |
+| File | Board | Language | Protocol variant |
+|---|---|---|---|
+| [dietrich_en.yaml](dietrich_en.yaml) | ESP8266 | English | `mcr3` (default) |
+| [dietrich_pl.yaml](dietrich_pl.yaml) | ESP8266 | Polish | `mcr3` (default) |
+| [dietrich_calenta_v1_p5_en.yaml](dietrich_calenta_v1_p5_en.yaml) | ESP8266 | English | `calenta_v1_p5` |
+| [dietrich_calenta_v1_p5_pl.yaml](dietrich_calenta_v1_p5_pl.yaml) | ESP8266 | Polish | `calenta_v1_p5` |
+| [dietrich_esp32_en.yaml](dietrich_esp32_en.yaml) | ESP32 | English | `mcr3` (default) |
+
+### ESP32 notes
+
+The component works on ESP32 as well (verified with an ESP32 DevKit V4 /
+`az-delivery-devkit-v4`), but do **not** copy the ESP8266 UART/logger settings:
+
+- keep the `logger:` on its default UART0/USB console — `hardware_uart: UART1`
+  would map to GPIO9/GPIO10, which are wired to the internal SPI flash on classic
+  ESP32 modules and crash the board in a boot loop (this was the cause of issue #7),
+- put the boiler bus on free pins, e.g. UART2: `tx_pin: GPIO17`, `rx_pin: GPIO16`.
 
 The component source lives in [components/dietrich](components/dietrich). Compared to the
 legacy custom component it also validates every response frame with CRC16 (`mcr3` variant)
