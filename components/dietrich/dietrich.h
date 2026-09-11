@@ -2,24 +2,49 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
 namespace esphome {
 namespace dietrich {
 
+// lookup table entry for the status/locking/blocking code registers
+struct CodeText;
+
 enum DietrichVariant : uint8_t {
   DIETRICH_VARIANT_MCR3 = 0,
   DIETRICH_VARIANT_CALENTA_V1_P5,
+  DIETRICH_VARIANT_PCU05_P3,
+};
+
+// One request/response exchange with the boiler
+enum DietrichRequest : uint8_t {
+  DIETRICH_REQ_SAMPLE = 0,
+  DIETRICH_REQ_COUNTER1,
+  DIETRICH_REQ_COUNTER2,
+};
+
+enum DietrichState : uint8_t {
+  DIETRICH_IDLE = 0,
+  DIETRICH_SEND,
+  DIETRICH_WAIT,
 };
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
  public:
   void set_variant(DietrichVariant variant) { this->variant_ = variant; }
+
   // frame status/state
   SUB_SENSOR(state)
   SUB_SENSOR(sub_state)
   SUB_SENSOR(lockout)
   SUB_SENSOR(blocking)
+
+  // decoded text for the four code registers above
+  SUB_TEXT_SENSOR(state)
+  SUB_TEXT_SENSOR(sub_state)
+  SUB_TEXT_SENSOR(lockout)
+  SUB_TEXT_SENSOR(blocking)
 
   // sample data - temperatures
   SUB_SENSOR(flow_temp)
@@ -29,11 +54,12 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(calorifier_temp)
   SUB_SENSOR(boiler_control_temp)
   SUB_SENSOR(room_temp)
-  SUB_SENSOR(ch_setpoint)          // co
-  SUB_SENSOR(dhw_setpoint)         // cwu
+  SUB_SENSOR(ch_setpoint)   // co
+  SUB_SENSOR(dhw_setpoint)  // cwu
   SUB_SENSOR(room_temp_setpoint)
 
-  // fan
+  // airflow setpoint / airflow (data offsets 22 and 24); kept under the historic
+  // fan_speed* names so existing configurations keep working
   SUB_SENSOR(fan_speed_setpoint)
   SUB_SENSOR(fan_speed)
 
@@ -49,20 +75,20 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(demand_source_bit1)  // BIT1=Heat demand from Mod.Controller
   SUB_SENSOR(demand_source_bit2)  // BIT2=Heat demand from on/off controller
   SUB_SENSOR(demand_source_bit3)  // BIT3=Frost Protection
-  SUB_SENSOR(demand_source_bit4)  // BIT4=DHW Eco
+  SUB_SENSOR(demand_source_bit4)  // BIT4=DHW Eco (inverted)
   SUB_SENSOR(demand_source_bit5)  // BIT5=DHW Blocking
   SUB_SENSOR(demand_source_bit6)  // BIT6=Anti Legionella
   SUB_SENSOR(demand_source_bit7)  // BIT7=DHW Heat Demand
 
-  SUB_SENSOR(input_bit0)  // BIT0=Shutdown Input
-  SUB_SENSOR(input_bit1)  // BIT1=Release Input
+  SUB_SENSOR(input_bit0)  // BIT0=Shutdown Input (inverted on pcu05_p3)
+  SUB_SENSOR(input_bit1)  // BIT1=Release Input (inverted on pcu05_p3)
   SUB_SENSOR(input_bit2)  // BIT2=Ionisation
   SUB_SENSOR(input_bit3)  // BIT3=Flow Switch detecting DHW
   SUB_SENSOR(input_bit5)  // BIT5=Min Gas Pressure
   SUB_SENSOR(input_bit6)  // BIT6=CH Enable
   SUB_SENSOR(input_bit7)  // BIT7=DHW Enable
 
-  SUB_SENSOR(valve_bit0)  // BIT0=Gas Valve
+  SUB_SENSOR(valve_bit0)  // BIT0=Gas Valve (inverted)
   SUB_SENSOR(valve_bit2)  // BIT2=Ignition
   SUB_SENSOR(valve_bit3)  // BIT3=3-Way valve position
   SUB_SENSOR(valve_bit4)  // BIT4=Ext.3-Way Valve
@@ -78,6 +104,20 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(hru)
   SUB_SENSOR(control_temp)
   SUB_SENSOR(dhw_flowrate)
+
+  // pcu05_p3 only - fields the Avanta/Calenta maps do not define
+  SUB_SENSOR(fan_speed_rpm)      // data 44, real fan speed in rpm
+  SUB_SENSOR(su_state)           // data 46
+  SUB_SENSOR(su_locking)         // data 47
+  SUB_SENSOR(su_blocking)        // data 48
+  SUB_SENSOR(ch_timer_enable)    // data 50 BIT6
+  SUB_SENSOR(dhw_timer_enable)   // data 50 BIT7
+  SUB_SENSOR(solar_temp)         // data 56
+  SUB_SENSOR(hmi_active)         // data 58
+  SUB_SENSOR(ch_setpoint_hmi)    // data 60
+  SUB_SENSOR(dhw_setpoint_hmi)   // data 61
+  SUB_SENSOR(service_mode)       // data 62
+  SUB_SENSOR(rs232_mode)         // data 63
 
   // counter data 1
   SUB_SENSOR(hours_run_pump)
@@ -95,25 +135,63 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(number_flame_loss)
 
   void update() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
  protected:
-  void get_sample_();
-  void get_counter_();
-  // publish only if the sensor is configured; the short delay keeps the
-  // API/WiFi stack fed so Home Assistant does not disconnect
-  void publish_(sensor::Sensor *s, float value, uint32_t wait = 100);
-  size_t read_response_(uint8_t *buffer, size_t len);
-  bool frame_valid_(const uint8_t *response, size_t n) const;
+  void send_request_();
+  void poll_response_();
+  void advance_();
+  void handle_response_();
+  void decode_sample_();
+  void decode_counter1_();
+  void decode_counter2_();
+
+  void command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const;
+  // number of header bytes before the data block in a response frame
+  size_t header_len_() const;
+  // number of checksum/ETX bytes after the data block
+  size_t trailer_len_() const;
+  // true when the received frame carries at least count bytes from data offset off
+  bool have_(size_t off, size_t count) const;
+  // raw data byte at a data-block offset (0 when out of range)
+  uint8_t d_(size_t off) const;
+  uint16_t le16_(size_t off) const;   // little-endian pair, sample block
+  uint16_t be16_(size_t off) const;   // big-endian pair, counter block
+
+  void publish_(sensor::Sensor *s, float value);
+  void publish_text_(text_sensor::TextSensor *s, const char *text);
+
+  // each of these is a no-op when the sensor is unset or the frame is too short
+  void pub_temp_(sensor::Sensor *s, size_t off);                 // signed 16-bit x 0.01 degC
+  void pub_s16_(sensor::Sensor *s, size_t off, float scale);     // signed 16-bit x scale
+  void pub_u16_(sensor::Sensor *s, size_t off);                  // unsigned 16-bit
+  void pub_u8_(sensor::Sensor *s, size_t off, float scale);      // byte x scale
+  void pub_s8_(sensor::Sensor *s, size_t off);                   // signed byte
+  void pub_bit_(sensor::Sensor *s, size_t off, uint8_t bit, bool invert);
+  void pub_code_(sensor::Sensor *num, text_sensor::TextSensor *txt, size_t off, const CodeText *table, size_t len);
+  void pub_counter_(sensor::Sensor *s, size_t off, float scale);  // big-endian 16-bit x scale
+
+  bool frame_valid_() const;
   static bool is_valid_crc_(const uint8_t *response, size_t n);
   static float signed_float_(float value);
   static float temp_or_nan_(uint16_t raw);
   static std::string hex_str_(const uint8_t *data, size_t len);
 
   DietrichVariant variant_{DIETRICH_VARIANT_MCR3};
-  bool reading_data_{false};
-  bool read_all_{true};
+
+  DietrichState state_machine_{DIETRICH_IDLE};
+  DietrichRequest queue_[2]{};
+  uint8_t queue_len_{0};
+  uint8_t queue_pos_{0};
+
+  uint8_t rx_buf_[96]{};
+  size_t rx_len_{0};
+  size_t data_len_{0};
+  uint32_t request_time_{0};
+  uint32_t last_byte_time_{0};
+  uint32_t next_send_time_{0};
   int counter_timer_{99};
 };
 

@@ -1,0 +1,252 @@
+--- # De Dietrich / Remeha boiler with a PCU-05 control board, parameter set P3
+#
+# The PCU-05 speaks the Remeha protocol (protocol.nr 1 in Recom's
+# DeviceConfiguration.xml), the same one the mcr3 variant uses. Its sample block
+# is a superset of the Avanta/Calenta maps, so `variant: pcu05_p3` adds the
+# extra fields and applies the bit inversions Recom defines for this board.
+#
+# Board here is an ESP32 DevKit V4; for a Wemos D1 (ESP8266) swap the `esp32:`
+# block for:
+#   esp8266:
+#     board: d1_mini
+# and put the bus on the hardware UART (tx_pin GPIO1 / rx_pin GPIO3).
+
+esphome:
+  name: dietrich-pcu05
+
+esp32:
+  board: az-delivery-devkit-v4
+
+wifi:
+  ssid: "ssid"
+  password: "password"
+
+# NOTE (ESP32): keep the logger on its default UART0/USB console. Do NOT use
+# `hardware_uart: UART1` - on classic ESP32 boards UART1 defaults to
+# GPIO9/GPIO10, which are wired to the internal SPI flash, and touching them
+# crashes the board in a boot loop (see issue #7).
+logger:
+
+web_server:
+
+api:
+
+ota:
+  platform: esphome
+
+external_components:
+  - source: github://kakaki/esphome_dietrich
+    components: [ dietrich ]
+  # or locally, when this YAML lives inside a clone of the repository:
+  # - source: components
+
+# Boiler bus on UART2 (GPIO16/GPIO17) - leaves UART0 free for the USB console
+uart:
+  id: uart_bus
+  baud_rate: 9600
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+
+dietrich:
+  uart_id: uart_bus
+  update_interval: 15s
+  variant: pcu05_p3
+
+  # Status registers. The *_text sensors decode the numeric code into the same
+  # wording Recom shows, so no template lambdas are needed.
+  state:
+    name: "Boiler state code"
+  state_text:
+    name: "Boiler state"
+  sub_state:
+    name: "Boiler sub state code"
+  sub_state_text:
+    name: "Boiler sub state"
+  lockout:
+    name: "Boiler lockout code"
+  lockout_text:
+    name: "Boiler lockout"
+  blocking:
+    name: "Boiler blocking code"
+  blocking_text:
+    name: "Boiler blocking"
+
+  # Temperatures
+  flow_temp:
+    name: "Boiler flow temp"
+  return_temp:
+    name: "Boiler return temp"
+  # dhw_in_temp and dhw_flowrate are combi (flow-through DHW) fields. On a solo
+  # boiler feeding a cylinder through the 3-way valve the sensor is absent, so
+  # dhw_in_temp publishes "unknown" and dhw_flowrate sits at 0 - calorifier_temp
+  # is the DHW temperature there.
+  dhw_in_temp:
+    name: "Boiler DHW in temp"
+  outside_temp:
+    name: "Boiler outside temp"
+  calorifier_temp:
+    name: "Boiler calorifier temp"
+  boiler_control_temp:
+    name: "Boiler control temp (internal)"
+  room_temp:
+    name: "Boiler room temp"
+  control_temp:
+    name: "Boiler control temp"
+  solar_temp:
+    name: "Boiler solar temp"
+
+  # Setpoints
+  ch_setpoint:
+    name: "Boiler setpoint CH"
+  dhw_setpoint:
+    name: "Boiler setpoint DHW"
+  room_temp_setpoint:
+    name: "Boiler setpoint room"
+  internal_setpoint:
+    name: "Boiler internal setpoint"
+  ch_setpoint_hmi:
+    name: "Boiler setpoint CH (HMI)"
+  dhw_setpoint_hmi:
+    name: "Boiler setpoint DHW (HMI)"
+
+  # Fan / airflow. fan_speed_setpoint and fan_speed are the airflow pair at data
+  # offsets 22/24; fan_speed_rpm is the dedicated rpm field at offset 44.
+  fan_speed_setpoint:
+    name: "Boiler airflow setpoint"
+  fan_speed:
+    name: "Boiler airflow"
+  fan_speed_rpm:
+    name: "Boiler fan speed"
+
+  # Power and flow
+  ionisation_current:
+    name: "Boiler ionisation current"
+  available_power:
+    name: "Boiler available power"
+  desired_max_power:
+    name: "Boiler desired max power"
+  actual_power:
+    name: "Boiler actual power"
+  pump_percentage:
+    name: "Boiler pump percentage"
+  dhw_flowrate:
+    name: "Boiler DHW flow rate"
+
+  # The PCU-05 P3 reads water pressure as a switch, not a transducer: its map has
+  # no analog pressure field and no pressure-sensor parameter. Low pressure shows
+  # up as "Min. water pressure(Blocking 14)" on blocking_text instead. Enable this
+  # only if your board turns out to report something that tracks the gauge.
+  # hydro_pressure:
+  #   name: "Boiler water pressure"
+
+  # Heat demand sources (byte 36)
+  demand_source_bit0:
+    name: "Boiler Mod.Controller Connected"
+  demand_source_bit1:
+    name: "Boiler Heat demand from Mod.Controller"
+  demand_source_bit2:
+    name: "Boiler Heat demand from on-off controller"
+  demand_source_bit3:
+    name: "Boiler Frost Protection"
+  demand_source_bit4:
+    name: "Boiler DHW Eco"
+  demand_source_bit5:
+    name: "Boiler DHW Blocking"
+  demand_source_bit6:
+    name: "Boiler Anti Legionella"
+  demand_source_bit7:
+    name: "Boiler DHW Heat Demand"
+
+  # Inputs (byte 37)
+  input_bit0:
+    name: "Boiler Shutdown Input"
+  input_bit1:
+    name: "Boiler Release Input"
+  input_bit2:
+    name: "Boiler Ionisation"
+  input_bit3:
+    name: "Boiler Flow Switch DHW"
+  input_bit5:
+    name: "Boiler Min Gas Pressure"
+  input_bit6:
+    name: "Boiler CH Enable"
+  input_bit7:
+    name: "Boiler DHW Enable"
+
+  # Valves (byte 38)
+  valve_bit0:
+    name: "Boiler Gas Valve"
+  valve_bit2:
+    name: "Boiler Ignition"
+  valve_bit3:
+    name: "Boiler 3-Way Valve"     # 0 = CH, 1 = DHW
+  valve_bit4:
+    name: "Boiler Ext. 3-Way Valve"
+  valve_bit6:
+    name: "Boiler Ext. Gas Valve"
+
+  # Pumps (byte 39)
+  pump_bit0:
+    name: "Boiler Pump"
+  pump_bit1:
+    name: "Boiler Calorifier Pump"
+  pump_bit2:
+    name: "Boiler Ext. CH Pump"
+  pump_bit4:
+    name: "Boiler Status Report"
+  pump_bit7:
+    name: "Boiler Opentherm SmartPower"
+
+  # Misc flags (byte 50)
+  hru:
+    name: "Boiler HRU active"
+  ch_timer_enable:
+    name: "Boiler CH timer enable"
+  dhw_timer_enable:
+    name: "Boiler DHW timer enable"
+
+  # Safety unit and HMI, PCU-05 P3 only
+  su_state:
+    name: "Boiler SU state"
+  su_locking:
+    name: "Boiler SU locking"
+  su_blocking:
+    name: "Boiler SU blocking"
+  hmi_active:
+    name: "Boiler HMI active"
+  service_mode:
+    name: "Boiler service mode"
+  rs232_mode:
+    name: "Boiler RS232 mode"
+
+  # Counters - refreshed every 8th poll
+  hours_run_pump:
+    name: "Boiler hours run pump"
+  hours_run_3way:
+    name: "Boiler hours run 3-way valve"
+  hours_run_ch:
+    name: "Boiler hours run CH"
+  hours_run_dhw:
+    name: "Boiler hours run DHW"
+  power_supply_aval_hours:
+    name: "Boiler power supply available hours"
+  pump_starts:
+    name: "Boiler pump starts"
+  number_of_3way_valve_cycles:
+    name: "Boiler 3-way valve cycles"
+  burner_start_dhw:
+    name: "Boiler burner starts DHW"
+  total_burner_start:
+    name: "Boiler total burner starts"
+  failed_burner_start:
+    name: "Boiler failed burner starts"
+  number_flame_loss:
+    name: "Boiler flame loss count"
+
+sensor:
+  - platform: wifi_signal
+    name: "Boiler WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Boiler Uptime"

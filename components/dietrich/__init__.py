@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sensor, uart
+from esphome.components import sensor, text_sensor, uart
 from esphome.const import (
     CONF_ID,
     DEVICE_CLASS_TEMPERATURE,
@@ -15,7 +15,7 @@ from esphome.const import (
 CODEOWNERS = ["@kakaki"]
 AUTHORS = ["@kakaki", "Claude Fable 5 (Anthropic)"]
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["sensor"]
+AUTO_LOAD = ["sensor", "text_sensor"]
 MULTI_CONF = False
 
 dietrich_ns = cg.esphome_ns.namespace("dietrich")
@@ -26,6 +26,7 @@ DietrichVariant = dietrich_ns.enum("DietrichVariant")
 VARIANTS = {
     "mcr3": DietrichVariant.DIETRICH_VARIANT_MCR3,
     "calenta_v1_p5": DietrichVariant.DIETRICH_VARIANT_CALENTA_V1_P5,
+    "pcu05_p3": DietrichVariant.DIETRICH_VARIANT_PCU05_P3,
 }
 
 
@@ -33,6 +34,15 @@ def _temp_schema():
     return sensor.sensor_schema(
         unit_of_measurement=UNIT_CELSIUS,
         accuracy_decimals=2,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+        state_class=STATE_CLASS_MEASUREMENT,
+    )
+
+
+def _temp0_schema():
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_CELSIUS,
+        accuracy_decimals=0,
         device_class=DEVICE_CLASS_TEMPERATURE,
         state_class=STATE_CLASS_MEASUREMENT,
     )
@@ -150,6 +160,19 @@ SENSOR_SCHEMAS = {
         accuracy_decimals=0,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
+    # pcu05_p3 additions
+    "fan_speed_rpm": _rpm_schema(),
+    "su_state": _raw_schema(),
+    "su_locking": _raw_schema(),
+    "su_blocking": _raw_schema(),
+    "ch_timer_enable": _bit_schema(),
+    "dhw_timer_enable": _bit_schema(),
+    "solar_temp": _temp_schema(),
+    "hmi_active": _raw_schema(),
+    "ch_setpoint_hmi": _temp0_schema(),
+    "dhw_setpoint_hmi": _temp0_schema(),
+    "service_mode": _raw_schema(),
+    "rs232_mode": _raw_schema(),
     # counter data 1
     "hours_run_pump": _hours_schema(),
     "hours_run_3way": _hours_schema(),
@@ -165,12 +188,21 @@ SENSOR_SCHEMAS = {
     "number_flame_loss": _count_schema(),
 }
 
+# decoded text for the status/locking/blocking code registers
+TEXT_SENSOR_SCHEMAS = {
+    "state_text": text_sensor.text_sensor_schema(),
+    "sub_state_text": text_sensor.text_sensor_schema(),
+    "lockout_text": text_sensor.text_sensor_schema(),
+    "blocking_text": text_sensor.text_sensor_schema(),
+}
+
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(Dietrich),
             cv.Optional(CONF_VARIANT, default="mcr3"): cv.enum(VARIANTS, lower=True),
             **{cv.Optional(key): schema for key, schema in SENSOR_SCHEMAS.items()},
+            **{cv.Optional(key): schema for key, schema in TEXT_SENSOR_SCHEMAS.items()},
         }
     )
     .extend(cv.polling_component_schema("15s"))
@@ -188,3 +220,8 @@ async def to_code(config):
         if key in config:
             sens = await sensor.new_sensor(config[key])
             cg.add(getattr(var, f"set_{key}_sensor")(sens))
+
+    for key in TEXT_SENSOR_SCHEMAS:
+        if key in config:
+            txt = await text_sensor.new_text_sensor(config[key])
+            cg.add(getattr(var, f"set_{key}_sensor")(txt))
