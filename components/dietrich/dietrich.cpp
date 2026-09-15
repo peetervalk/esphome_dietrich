@@ -281,12 +281,12 @@ void Dietrich::pub_s8_(sensor::Sensor *s, size_t off) {
   s->publish_state(static_cast<int8_t>(this->d_(off)));
 }
 
-void Dietrich::pub_bit_(sensor::Sensor *s, size_t off, uint8_t bit, bool invert) {
+void Dietrich::pub_bit_(binary_sensor::BinarySensor *s, size_t off, uint8_t bit, bool invert) {
   if (s == nullptr || !this->have_(off, 1))
     return;
-  uint8_t v = (this->d_(off) >> bit) & 1;
+  bool v = ((this->d_(off) >> bit) & 1) != 0;
   if (invert)
-    v = v ? 0 : 1;
+    v = !v;
   s->publish_state(v);
 }
 
@@ -355,37 +355,37 @@ void Dietrich::decode_sample_() {
   this->pub_u8_(this->actual_power_sensor_, 33, 1.0f);
 
   // byte 36 - heat demand sources; bit 4 (DHW eco) is inverted in every Recom map
-  this->pub_bit_(this->demand_source_bit0_sensor_, 36, 0, false);
-  this->pub_bit_(this->demand_source_bit1_sensor_, 36, 1, false);
-  this->pub_bit_(this->demand_source_bit2_sensor_, 36, 2, false);
-  this->pub_bit_(this->demand_source_bit3_sensor_, 36, 3, false);
-  this->pub_bit_(this->demand_source_bit4_sensor_, 36, 4, true);
-  this->pub_bit_(this->demand_source_bit5_sensor_, 36, 5, false);
-  this->pub_bit_(this->demand_source_bit6_sensor_, 36, 6, false);
-  this->pub_bit_(this->demand_source_bit7_sensor_, 36, 7, false);
+  this->pub_bit_(this->demand_source_bit0_binary_sensor_, 36, 0, false);
+  this->pub_bit_(this->demand_source_bit1_binary_sensor_, 36, 1, false);
+  this->pub_bit_(this->demand_source_bit2_binary_sensor_, 36, 2, false);
+  this->pub_bit_(this->demand_source_bit3_binary_sensor_, 36, 3, false);
+  this->pub_bit_(this->demand_source_bit4_binary_sensor_, 36, 4, true);
+  this->pub_bit_(this->demand_source_bit5_binary_sensor_, 36, 5, false);
+  this->pub_bit_(this->demand_source_bit6_binary_sensor_, 36, 6, false);
+  this->pub_bit_(this->demand_source_bit7_binary_sensor_, 36, 7, false);
 
   // byte 37 - inputs; PCU-05 P3 inverts the shutdown and release inputs
-  this->pub_bit_(this->input_bit0_sensor_, 37, 0, p3);
-  this->pub_bit_(this->input_bit1_sensor_, 37, 1, p3);
-  this->pub_bit_(this->input_bit2_sensor_, 37, 2, false);
-  this->pub_bit_(this->input_bit3_sensor_, 37, 3, false);
-  this->pub_bit_(this->input_bit5_sensor_, 37, 5, false);
-  this->pub_bit_(this->input_bit6_sensor_, 37, 6, false);
-  this->pub_bit_(this->input_bit7_sensor_, 37, 7, false);
+  this->pub_bit_(this->input_bit0_binary_sensor_, 37, 0, p3);
+  this->pub_bit_(this->input_bit1_binary_sensor_, 37, 1, p3);
+  this->pub_bit_(this->input_bit2_binary_sensor_, 37, 2, false);
+  this->pub_bit_(this->input_bit3_binary_sensor_, 37, 3, false);
+  this->pub_bit_(this->input_bit5_binary_sensor_, 37, 5, false);
+  this->pub_bit_(this->input_bit6_binary_sensor_, 37, 6, false);
+  this->pub_bit_(this->input_bit7_binary_sensor_, 37, 7, false);
 
   // byte 38 - valves; bit 0 (gas valve) is inverted in every Recom map
-  this->pub_bit_(this->valve_bit0_sensor_, 38, 0, true);
-  this->pub_bit_(this->valve_bit2_sensor_, 38, 2, false);
-  this->pub_bit_(this->valve_bit3_sensor_, 38, 3, false);
-  this->pub_bit_(this->valve_bit4_sensor_, 38, 4, false);
-  this->pub_bit_(this->valve_bit6_sensor_, 38, 6, false);
+  this->pub_bit_(this->valve_bit0_binary_sensor_, 38, 0, true);
+  this->pub_bit_(this->valve_bit2_binary_sensor_, 38, 2, false);
+  this->pub_bit_(this->valve_bit3_binary_sensor_, 38, 3, false);
+  this->pub_bit_(this->valve_bit4_binary_sensor_, 38, 4, false);
+  this->pub_bit_(this->valve_bit6_binary_sensor_, 38, 6, false);
 
   // byte 39 - pumps
-  this->pub_bit_(this->pump_bit0_sensor_, 39, 0, false);
-  this->pub_bit_(this->pump_bit1_sensor_, 39, 1, false);
-  this->pub_bit_(this->pump_bit2_sensor_, 39, 2, false);
-  this->pub_bit_(this->pump_bit4_sensor_, 39, 4, false);
-  this->pub_bit_(this->pump_bit7_sensor_, 39, 7, false);
+  this->pub_bit_(this->pump_bit0_binary_sensor_, 39, 0, false);
+  this->pub_bit_(this->pump_bit1_binary_sensor_, 39, 1, false);
+  this->pub_bit_(this->pump_bit2_binary_sensor_, 39, 2, false);
+  this->pub_bit_(this->pump_bit4_binary_sensor_, 39, 4, false);
+  this->pub_bit_(this->pump_bit7_binary_sensor_, 39, 7, false);
 
   this->pub_code_(this->state_sensor_, this->state_text_sensor_, 40, STATUS_CODES, STATUS_CODES_LEN);
   this->pub_code_(this->lockout_sensor_, this->lockout_text_sensor_, 41, LOCKING_CODES, LOCKING_CODES_LEN);
@@ -400,9 +400,9 @@ void Dietrich::decode_sample_() {
 
   // Not defined in the PCU-05 P3 map (Recom ships it commented out) - see README
   this->pub_u8_(this->hydro_pressure_sensor_, 49 + t, 0.1f);
-  this->pub_bit_(this->hru_sensor_, 50 + t, 1, false);
-  this->pub_bit_(this->ch_timer_enable_sensor_, 50 + t, 6, false);
-  this->pub_bit_(this->dhw_timer_enable_sensor_, 50 + t, 7, false);
+  this->pub_bit_(this->hru_binary_sensor_, 50 + t, 1, false);
+  this->pub_bit_(this->ch_timer_enable_binary_sensor_, 50 + t, 6, false);
+  this->pub_bit_(this->dhw_timer_enable_binary_sensor_, 50 + t, 7, false);
   this->pub_temp_(this->control_temp_sensor_, 51 + t);
   this->pub_s16_(this->dhw_flowrate_sensor_, 53 + t, 0.01f);
 

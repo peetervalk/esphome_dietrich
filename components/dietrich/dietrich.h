@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
@@ -71,37 +72,37 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(desired_max_power)
   SUB_SENSOR(actual_power)
 
-  SUB_SENSOR(demand_source_bit0)  // BIT0=Mod.Controller Connected
-  SUB_SENSOR(demand_source_bit1)  // BIT1=Heat demand from Mod.Controller
-  SUB_SENSOR(demand_source_bit2)  // BIT2=Heat demand from on/off controller
-  SUB_SENSOR(demand_source_bit3)  // BIT3=Frost Protection
-  SUB_SENSOR(demand_source_bit4)  // BIT4=DHW Eco (inverted)
-  SUB_SENSOR(demand_source_bit5)  // BIT5=DHW Blocking
-  SUB_SENSOR(demand_source_bit6)  // BIT6=Anti Legionella
-  SUB_SENSOR(demand_source_bit7)  // BIT7=DHW Heat Demand
+  SUB_BINARY_SENSOR(demand_source_bit0)  // BIT0=Mod.Controller Connected
+  SUB_BINARY_SENSOR(demand_source_bit1)  // BIT1=Heat demand from Mod.Controller
+  SUB_BINARY_SENSOR(demand_source_bit2)  // BIT2=Heat demand from on/off controller
+  SUB_BINARY_SENSOR(demand_source_bit3)  // BIT3=Frost Protection
+  SUB_BINARY_SENSOR(demand_source_bit4)  // BIT4=DHW Eco (inverted)
+  SUB_BINARY_SENSOR(demand_source_bit5)  // BIT5=DHW Blocking
+  SUB_BINARY_SENSOR(demand_source_bit6)  // BIT6=Anti Legionella
+  SUB_BINARY_SENSOR(demand_source_bit7)  // BIT7=DHW Heat Demand
 
-  SUB_SENSOR(input_bit0)  // BIT0=Shutdown Input (inverted on pcu05_p3)
-  SUB_SENSOR(input_bit1)  // BIT1=Release Input (inverted on pcu05_p3)
-  SUB_SENSOR(input_bit2)  // BIT2=Ionisation
-  SUB_SENSOR(input_bit3)  // BIT3=Flow Switch detecting DHW
-  SUB_SENSOR(input_bit5)  // BIT5=Min Gas Pressure
-  SUB_SENSOR(input_bit6)  // BIT6=CH Enable
-  SUB_SENSOR(input_bit7)  // BIT7=DHW Enable
+  SUB_BINARY_SENSOR(input_bit0)  // BIT0=Shutdown Input (inverted on pcu05_p3)
+  SUB_BINARY_SENSOR(input_bit1)  // BIT1=Release Input (inverted on pcu05_p3)
+  SUB_BINARY_SENSOR(input_bit2)  // BIT2=Ionisation
+  SUB_BINARY_SENSOR(input_bit3)  // BIT3=Flow Switch detecting DHW
+  SUB_BINARY_SENSOR(input_bit5)  // BIT5=Min Gas Pressure
+  SUB_BINARY_SENSOR(input_bit6)  // BIT6=CH Enable
+  SUB_BINARY_SENSOR(input_bit7)  // BIT7=DHW Enable
 
-  SUB_SENSOR(valve_bit0)  // BIT0=Gas Valve (inverted)
-  SUB_SENSOR(valve_bit2)  // BIT2=Ignition
-  SUB_SENSOR(valve_bit3)  // BIT3=3-Way valve position
-  SUB_SENSOR(valve_bit4)  // BIT4=Ext.3-Way Valve
-  SUB_SENSOR(valve_bit6)  // BIT6=Ext. Gas Valve
+  SUB_BINARY_SENSOR(valve_bit0)  // BIT0=Gas Valve (inverted)
+  SUB_BINARY_SENSOR(valve_bit2)  // BIT2=Ignition
+  SUB_BINARY_SENSOR(valve_bit3)  // BIT3=3-Way valve position
+  SUB_BINARY_SENSOR(valve_bit4)  // BIT4=Ext.3-Way Valve
+  SUB_BINARY_SENSOR(valve_bit6)  // BIT6=Ext. Gas Valve
 
-  SUB_SENSOR(pump_bit0)  // BIT0=Pump
-  SUB_SENSOR(pump_bit1)  // BIT1=Calorifier Pump
-  SUB_SENSOR(pump_bit2)  // BIT2=Ext.CH Pump
-  SUB_SENSOR(pump_bit4)  // BIT4=Status Report
-  SUB_SENSOR(pump_bit7)  // BIT7=Opentherm SmartPower
+  SUB_BINARY_SENSOR(pump_bit0)  // BIT0=Pump
+  SUB_BINARY_SENSOR(pump_bit1)  // BIT1=Calorifier Pump
+  SUB_BINARY_SENSOR(pump_bit2)  // BIT2=Ext.CH Pump
+  SUB_BINARY_SENSOR(pump_bit4)  // BIT4=Status Report
+  SUB_BINARY_SENSOR(pump_bit7)  // BIT7=Opentherm SmartPower
 
   SUB_SENSOR(hydro_pressure)
-  SUB_SENSOR(hru)
+  SUB_BINARY_SENSOR(hru)
   SUB_SENSOR(control_temp)
   SUB_SENSOR(dhw_flowrate)
 
@@ -110,8 +111,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(su_state)           // data 46
   SUB_SENSOR(su_locking)         // data 47
   SUB_SENSOR(su_blocking)        // data 48
-  SUB_SENSOR(ch_timer_enable)    // data 50 BIT6
-  SUB_SENSOR(dhw_timer_enable)   // data 50 BIT7
+  SUB_BINARY_SENSOR(ch_timer_enable)    // data 50 BIT6
+  SUB_BINARY_SENSOR(dhw_timer_enable)   // data 50 BIT7
   SUB_SENSOR(solar_temp)         // data 56
   SUB_SENSOR(hmi_active)         // data 58
   SUB_SENSOR(ch_setpoint_hmi)    // data 60
@@ -169,7 +170,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void pub_u16_(sensor::Sensor *s, size_t off);                  // unsigned 16-bit
   void pub_u8_(sensor::Sensor *s, size_t off, float scale);      // byte x scale
   void pub_s8_(sensor::Sensor *s, size_t off);                   // signed byte
-  void pub_bit_(sensor::Sensor *s, size_t off, uint8_t bit, bool invert);
+  void pub_bit_(binary_sensor::BinarySensor *s, size_t off, uint8_t bit, bool invert);
   void pub_code_(sensor::Sensor *num, text_sensor::TextSensor *txt, size_t off, const CodeText *table, size_t len);
   void pub_counter_(sensor::Sensor *s, size_t off, float scale);  // big-endian 16-bit x scale
 
