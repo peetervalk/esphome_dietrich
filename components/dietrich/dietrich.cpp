@@ -11,12 +11,35 @@ namespace dietrich {
 static const char *const TAG = "dietrich";
 
 // Remeha protocol (protocol.nr 1 in Recom's DeviceConfiguration.xml), used by
-// both the MCR3 and the PCU-05: 02 | DEST | SRC | LEN | FUNC | BLOCK | SUB |
-// CRC16-lo | CRC16-hi | 03. Responses repeat that 7 byte header, so the data
-// block starts at index 7.
+// both the MCR3 and the PCU-05:
+//
+//   02 | DEST | SRC | 05 | LEN | COMMAND | EXTCMD | data.. | CRC-lo CRC-hi | 03
+//
+// Byte 3 is a constant 0x05 and byte 4 is (frame length - 2), so a 10 byte
+// request carries 0x08 there. Responses repeat that 7 byte header, so the data
+// block starts at index 7. COMMAND 0x02 is SAMPLES (EXTCMD 0x01 selects the
+// sample format) and COMMAND 0x10 is READ_EPROM_BLOCK, where EXTCMD is a 16 byte
+// EEPROM block index - that is what the two counter requests below really are.
+// See mapping/pcu05_p3_protocol.md for the full command set, recovered from
+// Recom's own RemehaMessageFactory and checked against these three frames.
 static const uint8_t CMD_SAMPLE_MCR3[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x02, 0x01, 0x69, 0xAB, 0x03};
 static const uint8_t CMD_COUNTER1_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1C, 0x98, 0xC2, 0x03};
 static const uint8_t CMD_COUNTER2_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1D, 0x59, 0x02, 0x03};
+
+// Parameter block reads: COMMAND 0x10 (READ_EPROM_BLOCK) with the EEPROM block
+// index in the EXTCMD byte. Blocks 0x14..0x1B are the 128 byte parameter block,
+// 16 bytes per reply. SRC is 0x00 to match the counter reads, which are the same
+// command against blocks 0x1C/0x1D and are known to work on this bus.
+static const uint8_t CMD_PARAM_REMEHA[8][10] = {
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x14, 0x99, 0x04, 0x03},  // bytes   0..15
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x15, 0x58, 0xC4, 0x03},  // bytes  16..31
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x16, 0x18, 0xC5, 0x03},  // bytes  32..47
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x17, 0xD9, 0x05, 0x03},  // bytes  48..63
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x18, 0x99, 0x01, 0x03},  // bytes  64..79
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x19, 0x58, 0xC1, 0x03},  // bytes  80..95
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1A, 0x18, 0xC0, 0x03},  // bytes  96..111
+    {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1B, 0xD9, 0x00, 0x03},  // bytes 112..127
+};
 
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
@@ -29,6 +52,9 @@ static const uint32_t RESPONSE_TIMEOUT_MS = 600;
 static const uint32_t RX_QUIET_MS = 40;
 // settle time between two requests of the same cycle
 static const uint32_t INTER_REQUEST_MS = 60;
+// Parameters are configuration, not measurements - re-read them roughly hourly
+// (240 x the default 15s poll) so a service-tool edit shows up without a reboot.
+static const int PARAM_REFRESH_CYCLES = 240;
 
 struct CodeText {
   uint16_t code;
@@ -309,6 +335,13 @@ void Dietrich::pub_counter_(sensor::Sensor *s, size_t off, float scale) {
 }
 
 void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const {
+  if (req >= DIETRICH_REQ_PARAM0) {
+    const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
+    *cmd = CMD_PARAM_REMEHA[blk];
+    *len = sizeof(CMD_PARAM_REMEHA[blk]);
+    return;
+  }
+
   const bool calenta = this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5;
   switch (req) {
     case DIETRICH_REQ_COUNTER1:
@@ -451,9 +484,55 @@ void Dietrich::decode_counter2_() {
   this->pub_counter_(this->number_flame_loss_sensor_, 4, 1.0f);
 }
 
+void Dietrich::pub_param_(sensor::Sensor *s, size_t off, float scale) {
+  if (s == nullptr || off >= DIETRICH_PARAM_BYTES)
+    return;
+  s->publish_state(this->params_[off] * scale);
+}
+
+void Dietrich::pub_param_s8_(sensor::Sensor *s, size_t off) {
+  if (s == nullptr || off >= DIETRICH_PARAM_BYTES)
+    return;
+  // p27 and p30 are stored as two's complement; Recom shows them signed, the
+  // front panel does not (the manual tells installers to subtract 256 by hand)
+  s->publish_state(static_cast<int8_t>(this->params_[off]));
+}
+
+bool Dietrich::want_params_() const {
+  return this->param_ch_max_flow_sensor_ != nullptr || this->param_dhw_setpoint_sensor_ != nullptr ||
+         this->param_pump_post_run_sensor_ != nullptr || this->param_max_flow_system_sensor_ != nullptr ||
+         this->param_curve_foot_outside_sensor_ != nullptr || this->param_curve_foot_flow_sensor_ != nullptr ||
+         this->param_curve_cold_outside_sensor_ != nullptr || this->param_pump_ch_min_sensor_ != nullptr ||
+         this->param_pump_ch_max_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr;
+}
+
+void Dietrich::decode_params_() {
+  // the whole block, so any parameter can be read off the log without a rebuild
+  ESP_LOGD(TAG, "parameter block: %s", hex_str_(this->params_, DIETRICH_PARAM_BYTES).c_str());
+
+  this->pub_param_(this->param_ch_max_flow_sensor_, 0, 1.0f);         // p1
+  this->pub_param_(this->param_dhw_setpoint_sensor_, 1, 1.0f);        // p2
+  this->pub_param_(this->param_pump_post_run_sensor_, 4, 1.0f);       // p5
+  this->pub_param_(this->param_max_flow_system_sensor_, 22, 1.0f);    // p23
+  this->pub_param_(this->param_curve_foot_outside_sensor_, 24, 1.0f); // p25
+  this->pub_param_(this->param_curve_foot_flow_sensor_, 25, 1.0f);    // p26
+  this->pub_param_s8_(this->param_curve_cold_outside_sensor_, 26);    // p27
+  this->pub_param_(this->param_pump_ch_min_sensor_, 27, 10.0f);       // p28, stored x10 %
+  this->pub_param_(this->param_pump_ch_max_sensor_, 28, 10.0f);       // p29, stored x10 %
+  this->pub_param_(this->param_dhw_hysteresis_sensor_, 32, 1.0f);     // p33
+}
+
 void Dietrich::handle_response_() {
   const DietrichRequest req = this->queue_[this->queue_pos_];
-  const char *what = req == DIETRICH_REQ_SAMPLE ? "sample" : (req == DIETRICH_REQ_COUNTER1 ? "counter1" : "counter2");
+  char param_what[16];
+  const char *what;
+  if (req >= DIETRICH_REQ_PARAM0) {
+    snprintf(param_what, sizeof(param_what), "param 0x%02X",
+             static_cast<unsigned>(0x14 + (req - DIETRICH_REQ_PARAM0)));
+    what = param_what;
+  } else {
+    what = req == DIETRICH_REQ_SAMPLE ? "sample" : (req == DIETRICH_REQ_COUNTER1 ? "counter1" : "counter2");
+  }
 
   ESP_LOGD(TAG, "%s data (%u bytes): %s", what, static_cast<unsigned>(this->rx_len_),
            hex_str_(this->rx_buf_, this->rx_len_).c_str());
@@ -471,6 +550,18 @@ void Dietrich::handle_response_() {
   const size_t overhead = this->header_len_() + this->trailer_len_();
   this->data_len_ = this->rx_len_ > overhead ? this->rx_len_ - overhead : 0;
 
+  if (req >= DIETRICH_REQ_PARAM0) {
+    const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
+    const size_t n = this->data_len_ < DIETRICH_PARAM_BLOCK_SIZE ? this->data_len_ : DIETRICH_PARAM_BLOCK_SIZE;
+    for (size_t i = 0; i < n; i++)
+      this->params_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
+    this->param_blocks_seen_ |= static_cast<uint8_t>(1u << blk);
+    // publish only once the whole sweep is in, so the values are consistent
+    if (this->param_blocks_seen_ == 0xFF)
+      this->decode_params_();
+    return;
+  }
+
   switch (req) {
     case DIETRICH_REQ_SAMPLE:
       this->decode_sample_();
@@ -480,6 +571,8 @@ void Dietrich::handle_response_() {
       break;
     case DIETRICH_REQ_COUNTER2:
       this->decode_counter2_();
+      break;
+    default:
       break;
   }
 }
@@ -559,9 +652,19 @@ void Dietrich::update() {
   }
 
   this->counter_timer_++;
+  this->param_timer_++;
   this->queue_pos_ = 0;
 
-  if (this->counter_timer_ >= 8) {
+  // A parameter sweep is 8 requests, so give it a whole poll interval of its own
+  // rather than appending it to the sample or counter cycle.
+  if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->want_params_() &&
+      this->param_timer_ >= PARAM_REFRESH_CYCLES) {
+    this->param_timer_ = 0;
+    this->param_blocks_seen_ = 0;
+    for (uint8_t i = 0; i < DIETRICH_PARAM_BLOCKS; i++)
+      this->queue_[i] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + i);
+    this->queue_len_ = DIETRICH_PARAM_BLOCKS;
+  } else if (this->counter_timer_ >= 8) {
     this->counter_timer_ = 0;
     this->queue_[0] = DIETRICH_REQ_COUNTER1;
     this->queue_[1] = DIETRICH_REQ_COUNTER2;

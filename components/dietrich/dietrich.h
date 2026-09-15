@@ -18,12 +18,28 @@ enum DietrichVariant : uint8_t {
   DIETRICH_VARIANT_PCU05_P3,
 };
 
-// One request/response exchange with the boiler
+// One request/response exchange with the boiler. The PARAM entries read the
+// 128 byte parameter block out of EEPROM blocks 0x14..0x1B, 16 bytes at a time;
+// see mapping/pcu05_p3_protocol.md. They must stay last and contiguous - the
+// block index is recovered as (req - DIETRICH_REQ_PARAM0).
 enum DietrichRequest : uint8_t {
   DIETRICH_REQ_SAMPLE = 0,
   DIETRICH_REQ_COUNTER1,
   DIETRICH_REQ_COUNTER2,
+  DIETRICH_REQ_PARAM0,
+  DIETRICH_REQ_PARAM1,
+  DIETRICH_REQ_PARAM2,
+  DIETRICH_REQ_PARAM3,
+  DIETRICH_REQ_PARAM4,
+  DIETRICH_REQ_PARAM5,
+  DIETRICH_REQ_PARAM6,
+  DIETRICH_REQ_PARAM7,
 };
+
+// 8 blocks of 16 bytes
+static const size_t DIETRICH_PARAM_BLOCKS = 8;
+static const size_t DIETRICH_PARAM_BLOCK_SIZE = 16;
+static const size_t DIETRICH_PARAM_BYTES = DIETRICH_PARAM_BLOCKS * DIETRICH_PARAM_BLOCK_SIZE;
 
 enum DietrichState : uint8_t {
   DIETRICH_IDLE = 0,
@@ -135,6 +151,22 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(failed_burner_start)
   SUB_SENSOR(number_flame_loss)
 
+  // Stored parameters, read from EEPROM rather than the sample block. These are
+  // the boiler's configuration, not live measurements: they only change when
+  // somebody edits them with a service tool, so they are polled once an hour.
+  // Offsets are into the 128 byte parameter block (see the map in
+  // mapping/pcu05_p3_protocol.md), NOT into the sample block.
+  SUB_SENSOR(param_ch_max_flow)          // p1,  byte 0
+  SUB_SENSOR(param_dhw_setpoint)         // p2,  byte 1
+  SUB_SENSOR(param_pump_post_run)        // p5,  byte 4
+  SUB_SENSOR(param_max_flow_system)      // p23, byte 22
+  SUB_SENSOR(param_curve_foot_outside)   // p25, byte 24
+  SUB_SENSOR(param_curve_foot_flow)      // p26, byte 25
+  SUB_SENSOR(param_curve_cold_outside)   // p27, byte 26, signed
+  SUB_SENSOR(param_pump_ch_min)          // p28, byte 27, x10 %
+  SUB_SENSOR(param_pump_ch_max)          // p29, byte 28, x10 %
+  SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
+
   void update() override;
   void loop() override;
   void dump_config() override;
@@ -148,6 +180,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void decode_sample_();
   void decode_counter1_();
   void decode_counter2_();
+  void decode_params_();
+  // true when at least one param_* sensor is configured; nothing is requested
+  // from the boiler otherwise
+  bool want_params_() const;
 
   void command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const;
   // number of header bytes before the data block in a response frame
@@ -173,6 +209,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void pub_bit_(binary_sensor::BinarySensor *s, size_t off, uint8_t bit, bool invert);
   void pub_code_(sensor::Sensor *num, text_sensor::TextSensor *txt, size_t off, const CodeText *table, size_t len);
   void pub_counter_(sensor::Sensor *s, size_t off, float scale);  // big-endian 16-bit x scale
+  // parameter-block publishers; these read params_, not the received frame
+  void pub_param_(sensor::Sensor *s, size_t off, float scale);   // byte x scale
+  void pub_param_s8_(sensor::Sensor *s, size_t off);             // signed byte
 
   bool frame_valid_() const;
   static bool is_valid_crc_(const uint8_t *response, size_t n);
@@ -183,9 +222,15 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   DietrichVariant variant_{DIETRICH_VARIANT_MCR3};
 
   DietrichState state_machine_{DIETRICH_IDLE};
-  DietrichRequest queue_[2]{};
+  // long enough for the 8 parameter-block requests
+  DietrichRequest queue_[DIETRICH_PARAM_BLOCKS]{};
   uint8_t queue_len_{0};
   uint8_t queue_pos_{0};
+
+  uint8_t params_[DIETRICH_PARAM_BYTES]{};
+  // bit n set once block n has been received in the current sweep
+  uint8_t param_blocks_seen_{0};
+  int param_timer_{99999};
 
   uint8_t rx_buf_[96]{};
   size_t rx_len_{0};

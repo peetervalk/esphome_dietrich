@@ -10,6 +10,7 @@ from esphome.const import (
     STATE_CLASS_TOTAL_INCREASING,
     UNIT_CELSIUS,
     UNIT_HOUR,
+    UNIT_MINUTE,
     UNIT_PERCENT,
     UNIT_REVOLUTIONS_PER_MINUTE,
 )
@@ -88,6 +89,30 @@ def _count_schema():
     return sensor.sensor_schema(
         accuracy_decimals=0,
         state_class=STATE_CLASS_TOTAL_INCREASING,
+    )
+
+
+def _param_temp_schema():
+    # Stored parameters are whole-degree settings, not measurements, so they get
+    # no state_class - they would only clutter long-term statistics.
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_CELSIUS,
+        accuracy_decimals=0,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+    )
+
+
+def _param_percent_schema():
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_PERCENT,
+        accuracy_decimals=0,
+    )
+
+
+def _param_minutes_schema():
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_MINUTE,
+        accuracy_decimals=0,
     )
 
 
@@ -175,6 +200,21 @@ SENSOR_SCHEMAS = {
     "total_burner_start": _count_schema(),
     "failed_burner_start": _count_schema(),
     "number_flame_loss": _count_schema(),
+    # Stored parameters, read from EEPROM blocks 0x14..0x1B rather than from the
+    # sample block - pcu05_p3 only. Configuring any of these makes the component
+    # add an eight-request parameter sweep, once at boot and hourly after that.
+    # The four curve parameters describe a straight line through two points:
+    #   flow = p26 + (p1 - p26) x (p25 - T_outside) / (p25 - p27)
+    "param_ch_max_flow": _param_temp_schema(),  # p1
+    "param_dhw_setpoint": _param_temp_schema(),  # p2
+    "param_pump_post_run": _param_minutes_schema(),  # p5, 99 = continuous
+    "param_max_flow_system": _param_temp_schema(),  # p23
+    "param_curve_foot_outside": _param_temp_schema(),  # p25
+    "param_curve_foot_flow": _param_temp_schema(),  # p26
+    "param_curve_cold_outside": _param_temp_schema(),  # p27, negative
+    "param_pump_ch_min": _param_percent_schema(),  # p28
+    "param_pump_ch_max": _param_percent_schema(),  # p29
+    "param_dhw_hysteresis": _param_temp_schema(),  # p33
 }
 
 # Status bits. valve_bit0/bit6 and pump_bit0/bit1/bit2 carry a device_class
