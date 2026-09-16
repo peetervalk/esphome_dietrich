@@ -102,6 +102,14 @@ struct FakeBoiler {
   // mapping/pcu05_p3_protocol.md, *What cleared it*.
   int blocking_after_write{-1};
 
+  // COMMAND 0x09 / EXT 0x52, the factory-level unlock. No real board has been
+  // asked for it yet, so the simulator can answer either way: answer_factory
+  // false is a board that parses the frame and turns it down.
+  bool factory_mode{false};
+  bool factory_mode_ee{false};
+  bool answer_factory{true};
+  int factory_on{0}, factory_off{0};
+
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
   int resets{0};
   int idents{0};
@@ -135,6 +143,9 @@ struct FakeBoiler {
     require_service_for_write = true;
     service_mode_engages = true;
     writes_take_effect = true;
+    factory_mode = factory_mode_ee = false;
+    answer_factory = true;
+    factory_on = factory_off = 0;
     reads = writes = service_on = service_off = rejected_writes = 0;
     resets = 0;
     status = 8;
@@ -198,7 +209,13 @@ struct FakeBoiler {
       sample[43] = substatus;
       sample[44] = static_cast<uint8_t>(fan >> 8);
       sample[45] = static_cast<uint8_t>(fan & 0xFF);
-      sample[62] = 0;                       // stays 0 on a real PCU-05 P3
+      // Byte 62 stays 0 on a real PCU-05 P3 through a service-level unlock. It is
+      // the candidate flag for the factory one purely because it is the byte the
+      // map calls service_mode and the only one left that never moves; no board
+      // has confirmed it. The simulator makes it track factory mode so the
+      // component's readback has something to report - that is an assumption
+      // under test, not a fact.
+      sample[62] = factory_mode ? 1 : 0;
       sample[63] = service_mode ? 1 : 0;    // what actually tracks service mode
       respond(src, dst, cmd, ext, sample, sizeof(sample));
       return;
@@ -246,7 +263,8 @@ struct FakeBoiler {
       return;
     }
     if (cmd == 0x11) {  // WRITE_EPROM_BLOCK
-      if (require_service_for_write && !(dst == eeprom_addr ? service_mode_ee : service_mode)) {
+      const bool unlocked = dst == eeprom_addr ? (service_mode_ee || factory_mode_ee) : (service_mode || factory_mode);
+      if (require_service_for_write && !unlocked) {
         rejected_writes++;
         if (!answer_writes)
           return;  // silence, the other plausible refusal
@@ -269,6 +287,35 @@ struct FakeBoiler {
       if (!answer_writes)
         return;
       respond(src, dst, cmd, ext, nullptr, 0);
+      return;
+    }
+    if (cmd == 0x09) {  // CODE_FACTORY_COMMANDO
+      factory_on++;
+      if (!answer_factory) {
+        std::vector<uint8_t> nak{0x02, dst, src, 0x15, 0x08, cmd, ext};
+        const uint16_t c = crc16(nak.data(), 1, nak.size());
+        nak.push_back(static_cast<uint8_t>(c & 0xFF));
+        nak.push_back(static_cast<uint8_t>(c >> 8));
+        nak.push_back(0x03);
+        for (uint8_t b : nak)
+          tx.push_back(b);
+        return;
+      }
+      if (dst == eeprom_addr)
+        factory_mode_ee = true;
+      else
+        factory_mode = true;
+      respond(src, dst, cmd, ext, nullptr, 0);
+      return;
+    }
+    if (cmd == 0x1F && ext == 0x52) {  // the factory re-lock, before the service one
+      factory_off++;
+      if (dst == eeprom_addr)
+        factory_mode_ee = false;
+      else
+        factory_mode = false;
+      if (answer_factory)
+        respond(src, dst, cmd, ext, nullptr, 0);
       return;
     }
     if (cmd == 0x31) {  // RESET
@@ -880,6 +927,162 @@ int main() {
     check(logged("allow_writes is not set"), "refusal explains why");
     pump(*d);
     check(g_boiler.resets == 0, "and no frame was sent");
+    delete d;
+  }
+
+  // -- 18. factory level: unlock both addresses, sample, re-lock -------------
+  {
+    begin("factory mode test");
+    auto *d = make();
+    check(d->test_factory_mode(), "request accepted");
+    pump(*d);
+    check(g_boiler.factory_on == 2, "COMMAND 0x09 sent to both addresses");
+    check(g_boiler.factory_off == 2, "and both re-locked");
+    check(!g_boiler.factory_mode && !g_boiler.factory_mode_ee, "boiler left locked");
+    check(g_boiler.service_on == 0, "the service-level unlock was not sent");
+    check(g_boiler.writes == 0 && g_boiler.reads == 0, "nothing read, nothing written");
+    check(logged("factory mode readback: byte 62 = 1"), "the sample taken inside the window is reported");
+    delete d;
+  }
+
+  // -- 18b. a board that parses COMMAND 0x09 and refuses it ------------------
+  {
+    begin("factory mode is NAKed");
+    auto *d = make();
+    g_boiler.answer_factory = false;
+    check(d->test_factory_mode(), "request accepted");
+    pump(*d);
+    check(g_boiler.factory_on >= 1, "the frame went out");
+    check(logged("refused it (NAK)"), "the refusal is reported, not swallowed");
+    delete d;
+  }
+
+  // -- 18c. a parameter write at factory level uses 0x09, never 0x08 ---------
+  {
+    begin("write_param at factory level");
+    auto *d = make();
+    d->set_use_factory_mode(true);
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(g_boiler.factory_on == 2 && g_boiler.factory_off == 2, "unlocked and re-locked at factory level");
+    check(g_boiler.service_on == 0 && g_boiler.service_off == 0,
+          "CODE_SERVICE never sent - it is a level, not an addition");
+    check(g_boiler.writes == 8, "the whole parameter block was written");
+    check(g_boiler.eeprom[2][0] == 6, "p33 took effect");
+    delete d;
+  }
+
+  // -- 19. send_command builds the frame; the CRC cannot be got wrong --------
+  {
+    begin("send_command builds a valid frame");
+    auto *d = make();
+    check(d->send_command(0x01, 0x09, 0x52, ""), "request accepted");
+    pump(*d);
+    check(g_boiler.factory_on == 1, "the board saw COMMAND 0x09");
+    // exactly the frame this component hardcodes for the factory unlock at 0x01
+    check(logged("frame: 02FE01050809522EA603"), "frame matches the computed constant");
+    check(logged("raw frame: a response"), "the reply is decoded and reported");
+    delete d;
+  }
+
+  // -- 19b. with a payload, and the length byte follows it -------------------
+  {
+    begin("send_command with a payload");
+    auto *d = make();
+    check(d->send_command(0x01, 0x37, 0x00, "0C 00"), "spaces in the payload are fine");
+    pump(*d);
+    check(logged("frame: 02FE01050A37000C004D2303"), "length byte and CRC computed for the payload");
+    delete d;
+  }
+
+  // -- 19bb. the one-string form, which is what a text box in HA sends -------
+  {
+    begin("send_command_hex from a single string");
+    auto *d = make();
+    check(d->send_command_hex("01 09 52"), "recipient, command and ext");
+    pump(*d);
+    check(g_boiler.factory_on == 1, "the board saw COMMAND 0x09 at 0x01");
+    check(logged("frame: 02FE01050809522EA603"), "same frame as the typed form");
+    delete d;
+  }
+
+  // -- 19bc. with a payload, and too short to be one -------------------------
+  {
+    begin("send_command_hex payload and refusal");
+    auto *d = make();
+    check(d->send_command_hex("01 37 00 0C 00"), "payload bytes follow the ext");
+    pump(*d);
+    check(logged("frame: 02FE01050A37000C004D2303"), "length byte and CRC follow the payload");
+    check(!d->send_command_hex("01 09"), "fewer than three bytes is refused");
+    check(logged("needs at least recipient, command and ext"), "and says what it wanted");
+    delete d;
+  }
+
+  // -- 19c. bad hex is refused before anything is sent -----------------------
+  {
+    begin("send_command rejects bad hex");
+    auto *d = make();
+    check(!d->send_command(0x01, 0x09, 0x52, "0C0"), "odd digit count refused");
+    check(!d->send_command(0x01, 0x09, 0x52, "ZZ"), "non-hex refused");
+    pump(*d);
+    check(g_boiler.factory_on == 0, "and nothing went out");
+    delete d;
+  }
+
+  // -- 20. send_raw sends the bytes exactly as given -------------------------
+  {
+    begin("send_raw replays a frame verbatim");
+    auto *d = make();
+    check(d->send_raw("02 FE 01 05 08 08 0C AE CE 03"), "request accepted");
+    pump(*d);
+    check(g_boiler.service_on == 1, "the board saw CODE_SERVICE_START");
+    check(logged("raw frame: a response"), "the ACK is reported");
+    delete d;
+  }
+
+  // -- 20b. a bad CRC is flagged and sent anyway -----------------------------
+  {
+    begin("send_raw warns about a bad CRC but still sends");
+    auto *d = make();
+    check(d->send_raw("02FE0105 08080C 0000 03"), "request accepted");
+    pump(*d);
+    check(logged("the CRC in this frame is not the one"), "the mismatch is called out");
+    check(g_boiler.service_on == 1, "and the frame still went out - a refusal is a result");
+    delete d;
+  }
+
+  // -- 20c. too short to be a frame ------------------------------------------
+  {
+    begin("send_raw rejects a stub");
+    auto *d = make();
+    check(!d->send_raw("02FE0105"), "shorter than the minimum frame");
+    pump(*d);
+    check(g_boiler.service_on == 0, "nothing sent");
+    delete d;
+  }
+
+  // -- 20d. silence is reported rather than treated as a failure -------------
+  {
+    begin("send_raw when the board says nothing");
+    auto *d = make();
+    g_boiler.answer_service = false;
+    check(d->send_raw("02 FE 01 05 08 08 0C AE CE 03"), "request accepted");
+    pump(*d);
+    check(logged("no reply at all"), "silence is reported");
+    check(!logged("raw frame failed"), "and is not counted as a transaction failure");
+    delete d;
+  }
+
+  // -- 20e. the raw path is gated like every other intrusive command ---------
+  {
+    begin("raw frames are gated");
+    auto *d = new Dietrich();
+    d->set_variant(DIETRICH_VARIANT_PCU05_P3);
+    check(!d->send_raw("02 FE 01 05 08 08 0C AE CE 03"), "send_raw refused without allow_writes");
+    check(!d->send_command(0x01, 0x09, 0x52, ""), "send_command refused too");
+    check(!d->test_factory_mode(), "and so is the factory mode test");
+    pump(*d);
+    check(g_boiler.service_on == 0 && g_boiler.factory_on == 0, "nothing went out");
     delete d;
   }
 

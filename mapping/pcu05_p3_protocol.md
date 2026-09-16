@@ -10,6 +10,13 @@ frames already hard-coded in `components/dietrich/dietrich.cpp` byte-for-byte, C
 included, and the response rules were checked against a live PCU-05 P3 capture (see
 *Response validation*).
 
+> **Current state of the investigation:** jump to
+> [*Service level is not the commissioning unlock*](#service-level-is-not-the-commissioning-unlock).
+> A parameter write made at service level is ACKed, stored and verified, and then not
+> adopted by the PCU, which raises `Blocking 0` at its next identification. Several
+> earlier conclusions in this document — about the value written, the boiler's state at
+> the time, and the 0012 PIN being a UI gate — are marked where they were superseded.
+
 ## Frame layout
 
 ```
@@ -204,8 +211,15 @@ if (EnableServiceMode(true, dest)) {
 ```
 
 No service code is sent. `CreateServiceModeMessage` is a bare 10-byte frame with no
-payload, and nothing in the write path touches `SERVICE_CODE` (`0x37`) — the 0012 PIN
-Recom asks for is an application-level gate only.
+payload, and nothing in the decompiled write path touches `SERVICE_CODE` (`0x37`).
+
+> **That last step — "so the 0012 PIN is an application-level gate only" — was wrong,
+> and it cost this investigation a fortnight.** The owner has since written p1, p2 and
+> p25–p28 to *this* appliance with Recom, cleanly and with no blocking, and reaching
+> the dialog that allowed it needed the PIN — after which dF/dU were editable too.
+> Making dF/dU writable is a board-level capability, not a UI one. Whatever Recom
+> sends at that point, this decompile did not account for it. See *Service level is
+> not the commissioning unlock*.
 
 `SetEepromData` writes each block as:
 
@@ -507,7 +521,7 @@ blocking codes and only one thing ended it.
 | Time | Event | Blocking after |
 |---|---|---|
 | 14:19 | — | `No blocking` |
-| 14:23:14 | full-block write, `p33 4 -> 6`, boiler mid-DHW-charge (substatus 60, pump post-run) | **0**, PCU parameter fault, 14 s later |
+| 14:23:14 | full-block write, `p33 4 -> 6`, boiler in `8:Controlled stop` / `0:Standby` | **0**, PCU parameter fault, 14 s later |
 | ~15:0x | mains power cycle | **0**, unchanged |
 | 16:38:28 | full-block write, `p33 6 -> 4`, boiler already in blocking mode, substatus 0 | **20**, Identification running, 17 s later |
 | 16:40:49 | `IDENTIFICATION` read, both addresses | **20**, unchanged |
@@ -516,9 +530,10 @@ blocking codes and only one thing ended it.
 
 What that settles, and what it does not:
 
-- **A full-block write provokes a blocking on this board whatever the value is.** The
-  second write restored the factory value the boiler had run on for years, and blocked
-  anyway. It is the write, not the bytes.
+- ~~**A full-block write provokes a blocking on this board whatever the value is.**~~
+  **Wrong on both counts, and superseded twice over.** The two writes were made at
+  *service* level; a write made at *factory* level does not block at all. And the write
+  is not what the PCU objects to — see *Service level is not the commissioning unlock*.
 - **A power cycle is not reliably enough.** The first one, with `p33 = 6` in the EEPROM,
   changed nothing at all. The second, after `p33 = 4` was back, cleared it. Two things
   differ between them — the value, and the fact that a second write had happened — so
@@ -526,19 +541,164 @@ What that settles, and what it does not:
 - **`Blocking 20` is not cleared by an `IDENTIFICATION` read.** The board sat in
   *Identification running* for 68 minutes while answering identification reads normally,
   and rode out two resets of the client. Whatever it is waiting for, that command is not
-  it. `AUTO_DETECT` (`0x33`) and `RESET` (`0x31`) are the two untried candidates;
+  it. `AUTO_DETECT` (`0x33`) and `RESET` (`0x31`) were the two untried candidates;
   `PCU-05_P3.xml` gives both a 5 second settle time (`command.auto.detect.time`,
-  `command.df.du.time`).
+  `command.df.du.time`). `RESET` has since been sent to a *healthy* board, which
+  ACKed it and carried on unchanged — see *`RESET` is ACKed and does nothing
+  observable*. Whether it clears a blocking is still unknown.
 - **The image itself is accepted.** The boiler has run CH and DHW normally on it since
   17:46, and the second EEPROM sweep shows nothing anywhere in its 2 KB was brought into
   agreement with the write — see `pcu05_p3_eeprom_map.md`, *The second sweep*. The
   stale-checksum theory is dead, and with it the idea that the PCU keeps parameter
   integrity data the write failed to update.
 
-The one difference between the two writes that is still unaccounted for is the boiler's
-own state: the first went out while it was finishing a DHW charge, the second while it
-was stopped. That is the leading hypothesis, and it is the one the component now acts
-on — see *What the component implements*.
+~~The one difference between the two writes that is still unaccounted for is the
+boiler's own state: the first went out while it was finishing a DHW charge, the second
+while it was stopped.~~ **Also wrong, and it came from misreading a consequence as a
+cause.** Home Assistant's recorder has the boiler in `8:Controlled stop` / `0:Standby`
+continuously from 14:19:58, and `9:Blocking mode` *and* `60:Pump post running` arriving
+together in the same state change at 14:23:28. Substatus 60 is the boiler shutting down
+**because** it blocked. The same is true of the second episode at 19:15:16. Both
+`p33 = 6` writes went out to a quiet boiler.
+
+`boiler_is_quiet_()` therefore cannot prevent this and never could: the gate passed on
+both occasions, correctly. It is kept because writing 128 bytes of live control settings
+into a burning boiler is a bad idea on its own merits, not because it addresses this
+fault.
+
+### Service level is not the commissioning unlock
+
+**This is where the investigation stands as of 2026-09-16.** Everything above about
+addresses, block counts, boiler state and parameter values is either settled or
+superseded by it.
+
+#### What the owner did with Recom
+
+On this appliance, with this PCU, before any of this: **p1, p2, p25, p26, p27 and p28
+written with Recom, cleanly.** No blocking, no power cycle, a seamless transition from
+the old value to the new one with the heating curve recalculating around the new
+footpoint as it went. Reaching the dialog that allowed it needed the **0012 PIN**, and
+once past it **dF and dU were editable too**.
+
+Two things fall out of that immediately:
+
+- **It is not the parameter group.** p25-p28 are group 2, the same group as p33. The
+  XML splits the 98 parameters into four groups - 1 is p1-p5 (bytes 0-4, the handful
+  the front panel owns), 2 is p17-p54, 3 is p55-p107, 4 is p108-p124 - and Recom
+  changed group 2 without trouble.
+- **It is not the value, the address, the block count or the boiler's state.** All four
+  have now been eliminated, each for its own reason, above.
+
+What is left is the **unlock level**. Every parameter write this component has ever
+made used `CODE_SERVICE` - `COMMAND 0x08` with `EXT 0x0C`. Recom was in factory level.
+
+#### The two levels
+
+Both are in Recom's own tables, at the top of this document:
+
+| | COMMAND | EXT | Used by |
+|---|---|---|---|
+| Service | `0x08` start, `0x1F` stop | `0x0C` (`CODE_SERVICE` = 12) | every write this component has made |
+| Factory | `0x09` (`CODE_FACTORY_COMMANDO`) | `0x52` (`CODE_FACTORY` = 82) | **never sent, not once** |
+
+The pairing of `0x09` with `0x52` is inferred from the symmetry with `0x08`/`0x0C`, and
+the re-lock - `0x1F` with the factory EXT - is a guess. Neither has been put to
+hardware yet.
+
+#### Why this explains what service level does
+
+Service level is evidently enough to make `WRITE_EPROM_BLOCK` *legal*: the frame is
+ACKed, the bytes land, and the verify read agrees byte for byte. It is not enough to
+make the PCU **adopt** them. The PCU carries on running the set it already has, and at
+the next identification the store no longer matches it - which is exactly the fault it
+raises, and exactly what it is called: `Blocking 0`, *PCU parameter fault*.
+
+That accounts for every observation, including the ones that made no sense before:
+
+- **The value never mattered.** `p33 = 6` was not invalid; Recom's XML gives it
+  `min="2" max="15"`. Any value other than the one the PCU was already running would
+  have done the same. Writing `04` back "fixed" it only because it restored agreement.
+- **The write procedure never mattered.** Between 19:15:16 and 19:50:34 on 2026-09-16
+  the parameter EEPROM was not touched at all - the two button presses in that window
+  were skipped by the "parameter already reads N" check - and the boiler still fell into
+  `Blocking 0` five separate times, on five manual front-panel resets. Each reset ran an
+  identification (`Blocking 20`, and the front-panel CH max reading 0 while it ran),
+  decided the set was inconsistent, and dropped back to `Blocking 0`. **No write was
+  involved in any of those five.** It is what is *stored*, judged against what the PCU
+  is *running*, and nothing about how it got there.
+- **Why a power cycle was needed afterwards.** Restoring the byte removes the
+  disagreement but does not by itself reload the PCU; the pending re-identification
+  completes on the next restart, which is why `Blocking 20` then cleared to
+  `No blocking` at 17:46:15 and again at 19:53:30.
+
+#### What was ruled out along the way
+
+Worth recording so it is not re-tried:
+
+- **There is no parameter checksum anywhere in either 2 KB image.** The board's
+  convention is CRC16 poly `0xA001`, init `0xFFFF`, stored LSB first - verified by
+  reproducing the counter block (`a199` -> `0x99A1`) and record `0x40` (`13cc` ->
+  `0xCC13`). Run over the parameter image, that CRC does not produce `85 9A` for any
+  range, and the CRC of the parameter image appears nowhere in either store. The only
+  two apparent hits sit at `0x37+2` and `0x38+2`, inside the locking ring where the map
+  documents an operating-hours field - both records read 39 164 hours, so it is one
+  counter seen twice.
+- **It is not a PSU disagreement.** The PCU has a dedicated code for that,
+  `Blocking 18` *Ident. PSU mismatch*, and it never fired. It raised `Blocking 0`,
+  which names the PCU's own set.
+- **"Parameter CRC fault" is not a PCU-05 string.** It is `language.xml` id 3624, in a
+  block with "OT communication fault slave/master", "Settings unequal to config" and
+  "Detect and save config...", the Avanta/MCBA auto-detect family. The PCU-05 tables are
+  at 2300-2334 (blocking) and 2400-2412 (locking).
+- **The stale `0x16` block at address `0x01`** - p33 = 6, left by the early misdirected
+  writes - is byte-identical across all three EEPROM sweeps and is not involved. The
+  boiler runs happily with `0x00` reading 4 and `0x01` reading 6.
+
+#### What Home Assistant's recorder added
+
+The ESP log covers 19:50 onwards only; the recorder has the rest, and three things came
+from it alone: the five reset-and-fall-back cycles between 19:40 and 19:48, the boiler
+being in standby at the instant of both `p33 = 6` writes, and the attribution of each
+write to the button press that caused it. `button.*` entities keep their last-press
+timestamp as state, so the recorder's history of them is a log of every press. Local
+time is UTC+3.
+
+#### How to test it
+
+The component now carries the framework for this; nothing below has been run against
+hardware yet.
+
+1. **`test_factory_mode()`** - "Boiler factory mode self-test". Unlocks both addresses
+   with `0x09`/`0x52`, reads one sample while unlocked, re-locks. Writes nothing and
+   reads no EEPROM, so if the board NAKs `COMMAND 0x09` this is how you find out at no
+   risk. It logs `factory mode readback: byte 62 = ?, byte 63 = ?`. Byte 63 is known to
+   track the service unlock; byte 62 is the candidate for the factory one and has never
+   been seen to move. **If byte 62 goes to 1 here, that is the finding.**
+2. **`send_command_hex()`** - "Boiler send command", driven by the *Boiler command spec*
+   text box: `<recipient> <command> <ext> [payload...]` in hex. The length byte and the
+   CRC are computed, so the only things that can be wrong are the ones being tested.
+   Worth trying: `01 09 52` and `00 09 52`, `01 1F 52`, `01 33 00` (`AUTO_DETECT`, 5 s
+   settle), `01 37 00 0C 00` (`SERVICE_CODE` with the PIN as a payload - the encoding is
+   a guess).
+3. **`send_raw()`** - "Boiler send raw frame", for replaying a captured frame verbatim.
+   A bad CRC is flagged and sent anyway.
+4. **`use_factory_mode: true`** on the component - makes `write_param()` unlock with
+   `0x09`/`0x52` instead of `0x08`/`0x0C`. It is a level, not an addition: the two are
+   never sent together. Leave it off until step 1 shows the board answering `0x09`.
+
+A raw reply is never rejected. A NAK, a truncated frame or silence are all reported -
+when the frame being sent is a guess, the refusal is the result.
+
+#### The thing that would end the guessing
+
+**Put a serial sniffer between Recom and the boiler and capture one parameter write at
+factory level.** That gives the unlock, whatever carries the PIN, the write sequence and
+anything sent afterwards to make the PCU adopt it - exactly, rather than inferred from a
+decompile that has already been wrong once on this point. The owner is looking for a
+Recom build from the period when it was working.
+
+Until then, `use_factory_mode` rests on an inference, and the honest status of this
+whole section is: **the best explanation of every observation so far, and untested.**
 
 ### dF/dU is not in the parameter block
 
@@ -772,6 +932,11 @@ retried.
 
 ### What the component implements
 
+> **Read *Service level is not the commissioning unlock* first.** Everything in this
+> section describes writes made at *service* level, which this board accepts, stores and
+> then declines to adopt. The section below is a correct description of what the code
+> does; it is not a description of a write that works.
+
 Write support now exists in `components/dietrich/dietrich.cpp`, built to this
 specification. It is gated behind `allow_writes` in the YAML and behind
 `variant: pcu05_p3` — the 128 byte parameter map belongs to that parameter
@@ -783,6 +948,12 @@ A write is a seven step transaction on the component's existing request queue:
 SAMPLES -> CODE_SERVICE_START x2 -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK
         -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP x2 -> SAMPLES
 ```
+
+With `use_factory_mode: true` the two unlocks and the two re-locks become
+`CODE_FACTORY_COMMANDO` (`0x09`/`0x52`) and its re-lock instead. The shape of the
+transaction is otherwise unchanged, and the two levels are never sent together — see
+*Service level is not the commissioning unlock*, which is also why that option exists
+and why it is off by default.
 
 The two `SAMPLES` are what *What cleared it* above cost:
 
@@ -829,10 +1000,41 @@ Home Assistant reaches them — see the commented-out section at the bottom of
 | `reset_board()` | `COMMAND 0x31` on its own — see below |
 
 `reset_board()` sends `RESET` to the PCU, unlocking nothing and touching no EEPROM.
-It is deliberately not part of `write_param()`: this board has never been asked for
-the command, so what it does is unverified, and the only reason to want it is the
-blocking a write leaves behind — which a mains power cycle also clears. Press it on
-a boiler that is already blocked, with the log open, and record what happens.
+It is deliberately not part of `write_param()`: the only reason to want it is the
+blocking a write leaves behind, and a mains power cycle clears that anyway.
+
+#### `RESET` is ACKed and does nothing observable
+
+Pressed on 2026-09-16 at 19:05:29 on a healthy board, out of curiosity rather than
+need. The PCU answered in 119 ms:
+
+```
+02 FE 01 05 08 31 00 BC9B 03   # request:  RESET, EXT NONE
+02 01 FE 06 08 31 00 BCC4 03   # response: ACK, COMMAND and EXT echoed, no data
+```
+
+Ten bytes, `[3] = 06`, zero data bytes — the same bare-echo ACK shape as
+`CODE_SERVICE_START`, which means the frame was understood and says nothing about
+what was done with it. What the logged sensors say happened afterwards: nothing.
+
+| Time | State | Sub-status | Blocking |
+|---|---|---|---|
+| 19:03:15 | 8 Controlled stop | 1 Anti-cycling | No blocking |
+| **19:05:29** | **`RESET` sent and ACKed** | | |
+| 19:09 | 8 Controlled stop | 1 Anti-cycling | No blocking |
+
+So `0x31` is a command this board accepts, and whatever it does, it is **not** a
+restart: the mains power cycle at 17:46 the same afternoon announced itself as
+*17 De-airation* in the very next sample, and this produced no state change at
+all — the anti-cycle period that began at 19:01 ran out on its own schedule.
+Nothing was cleared because nothing needed clearing.
+
+That leaves the experiment worth doing still undone: `RESET` on a board that is
+actually in blocking mode. It costs a deliberate re-block to set up, so it waits
+for the next accidental one. Note also that the component sends the one frame and
+reports immediately, taking no sample of its own — `PCU-05_P3.xml` allows a 5
+second settle time for its neighbouring commands, and any effect would surface on
+the next poll, not in the transaction's own log lines.
 
 ## Hysteresis parameters
 

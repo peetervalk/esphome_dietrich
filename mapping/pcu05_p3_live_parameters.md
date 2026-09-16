@@ -7,7 +7,9 @@ been running on, not the one it holds now.
 Kept because a `Blocking 0` (*PCU parameter fault*) is one of the faults whose
 documented remedy is to reload the factory parameter set from the **dF/dU codes on
 the appliance's identification plate**, which discards every commissioned value.
-This file is what you re-enter afterwards. The dF/dU codes are not in this image -
+This file is what you re-enter afterwards. (On the evidence since, that remedy should
+not be needed: the image itself was never the problem - see *Service level is not the
+commissioning unlock* in `pcu05_p3_protocol.md`.) The dF/dU codes are not in this image -
 see *dF/dU is not in the parameter block* in `pcu05_p3_protocol.md`. See *The full-block write lands, and the PCU blocks on
 it* in `pcu05_p3_protocol.md` for how the boiler got there.
 

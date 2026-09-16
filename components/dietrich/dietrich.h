@@ -45,6 +45,22 @@ enum DietrichRequest : uint8_t {
   // COMMAND 0x31, the protocol's own restart. Never sent as part of a write -
   // only by reset_board(), on its own. See start_txn_().
   DIETRICH_REQ_RESET,
+  // COMMAND 0x09 (CODE_FACTORY_COMMANDO) with EXT_COMMAND 0x52 (CODE_FACTORY =
+  // 82), and the matching re-lock. This is the unlock level Recom reaches after
+  // the 0012 PIN - the one where dF/dU become editable - and no version of this
+  // component has ever sent it. Every parameter write this component has made
+  // used CODE_SERVICE (0x08/0x0C) instead, which the board ACKs and stores and
+  // then refuses to adopt. See mapping/pcu05_p3_protocol.md, *Service mode is
+  // not the commissioning unlock*.
+  DIETRICH_REQ_FACTORY_ON,
+  DIETRICH_REQ_FACTORY_OFF,
+  DIETRICH_REQ_FACTORY_ON_EE,
+  DIETRICH_REQ_FACTORY_OFF_EE,
+  // One arbitrary frame, built by send_raw() or send_command() and sent exactly
+  // once. It is the only request kind whose reply is never rejected: a NAK, a
+  // truncated frame or silence are all results worth having when probing a
+  // command whose shape is a guess.
+  DIETRICH_REQ_RAW,
   // EEPROM block writes, one per parameter block. Contiguous like the PARAM
   // entries and immediately below them, so the block is (req - WRITE0) and the
   // range test is WRITE0 <= req < PARAM0.
@@ -79,8 +95,12 @@ static const size_t DIETRICH_READ_FRAME_LEN = 10;
 // EEPROMSize in PCU-05_P3.xml, in 16 byte blocks: 0x00..0x7F
 static const uint16_t DIETRICH_EEPROM_BLOCKS = 128;
 // A full parameter write is 1 pre-flight sample + 2 unlocks + 8 reads + 8 writes
-// + 8 verify reads + 2 re-locks + 1 post-write sample
-static const size_t DIETRICH_QUEUE_LEN = 32;
+// + 8 verify reads + 2 re-locks + 1 post-write sample. Rounded up so an unlock
+// pair can be added without the queue silently overflowing.
+static const size_t DIETRICH_QUEUE_LEN = 40;
+// Longest frame send_raw() will accept. A write frame is 26; this leaves room to
+// replay something longer off a capture without letting a typo run away.
+static const size_t DIETRICH_RAW_FRAME_MAX = 40;
 
 enum DietrichState : uint8_t {
   DIETRICH_IDLE = 0,
@@ -98,6 +118,8 @@ enum DietrichTxn : uint8_t {
   DIETRICH_TXN_PARAM,         // read-modify-write one parameter byte
   DIETRICH_TXN_RELOCK,        // re-lock only; used when the boiler boots unlocked
   DIETRICH_TXN_RESET,         // COMMAND 0x31 on its own, unlocking nothing
+  DIETRICH_TXN_FACTORY_TEST,  // factory unlock, one sample, re-lock; writes nothing
+  DIETRICH_TXN_RAW,           // one arbitrary frame, unlocking nothing
 };
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
@@ -109,6 +131,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
     this->pending_ident_ = variant == DIETRICH_VARIANT_PCU05_P3;
   }
   void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
+  // When set, a parameter write unlocks with CODE_FACTORY (0x09/0x52) instead of
+  // CODE_SERVICE (0x08/0x0C). This is a level, not an addition - Recom asks for
+  // the PIN and is then in factory level - so the two are never sent together.
+  void set_use_factory_mode(bool use) { this->use_factory_mode_ = use; }
 
   // frame status/state
   SUB_SENSOR(state)
@@ -278,6 +304,43 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // yourself, with the log open, on a boiler that is already blocked.
   bool reset_board();
 
+  // Factory level, COMMAND 0x09 with EXT_COMMAND 0x52: unlock both addresses,
+  // take one sample, re-lock. The exact parallel of test_service_mode(), and the
+  // safe way to find out whether the board answers the command at all - nothing
+  // is read from EEPROM and nothing is written. Watch sample byte 62, which this
+  // map calls service_mode and which has never moved while byte 63 tracked the
+  // service-level unlock; if byte 62 is the factory flag, this is what moves it.
+  bool test_factory_mode();
+
+  // --- raw frames ---------------------------------------------------------
+  // The escape hatch. Both send one frame and log whatever comes back without
+  // judging it: a NAK, a short frame or silence are all reported rather than
+  // rejected, because when the frame being tried is a guess the refusal is the
+  // finding. Neither touches params_, neither unlocks anything, and neither is
+  // part of any transaction.
+  //
+  // send_command() builds the frame: STX, sender 0xFE, recipient dst, request
+  // type, length, cmd, ext, the data bytes, CRC16 and ETX. Use this for anything
+  // being tried for the first time - the length byte and the CRC cannot be got
+  // wrong. data_hex may be empty, and may contain spaces.
+  //
+  //   id(boiler).send_command(0x01, 0x09, 0x52, "");   // factory unlock -> PCU
+  //
+  // send_raw() sends the bytes exactly as given, STX and CRC and ETX included,
+  // and is for replaying a frame captured off Recom verbatim. It checks nothing
+  // beyond the length, so a bad CRC goes out as a bad CRC - which is sometimes
+  // the point.
+  //
+  //   id(boiler).send_raw("02FE01050809522EA603");
+  bool send_command(uint8_t dst, uint8_t cmd, uint8_t ext, const std::string &data_hex);
+  // The same thing from one string, so a single text box in Home Assistant can
+  // drive it: recipient, command, ext, then any payload bytes.
+  //
+  //   "01 09 52"          factory unlock -> PCU
+  //   "01 37 00 0C 00"    SERVICE_CODE with a two byte payload
+  bool send_command_hex(const std::string &spec);
+  bool send_raw(const std::string &hex);
+
   void update() override;
   void loop() override;
   void dump_config() override;
@@ -323,6 +386,17 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // reads inside its range - i.e. the image is plausibly a real one
   bool image_is_sane_() const;
   bool block_is_sane_(size_t blk) const;
+  // Report a raw reply without rejecting it: length, what the type byte says,
+  // whether the addresses came back swapped and the COMMAND/EXT echoed, and
+  // whether the CRC is good. Everything response_error_() would have refused on,
+  // said out loud instead.
+  void log_raw_reply_() const;
+  // hex text (spaces allowed) into out; false when it is not valid hex or does
+  // not fit
+  static bool parse_hex_(const std::string &hex, uint8_t *out, size_t max, size_t *len);
+  // build a well-formed request frame around cmd/ext/data and stage it as the
+  // one frame of a DIETRICH_TXN_RAW transaction
+  bool build_and_stage_command_(uint8_t dst, uint8_t cmd, uint8_t ext, const uint8_t *data, size_t data_len);
   // fills tx_buf_ with a READ_EPROM_BLOCK request for one block
   void build_read_frame_(uint8_t addr, uint8_t block);
   // fills tx_buf_ from txn_image_; only valid after begin_write_phase_()
@@ -393,6 +467,11 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
 
   // --- write path ---------------------------------------------------------
   bool allow_writes_{false};
+  bool use_factory_mode_{false};
+
+  // the one frame a DIETRICH_TXN_RAW transaction sends
+  uint8_t raw_buf_[DIETRICH_RAW_FRAME_MAX]{};
+  size_t raw_len_{0};
 
   // staged by the public write methods, consumed by start_txn_()
   DietrichTxn pending_txn_{DIETRICH_TXN_NONE};

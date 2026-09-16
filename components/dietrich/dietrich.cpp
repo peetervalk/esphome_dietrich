@@ -74,6 +74,26 @@ static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08,
 static const uint8_t CMD_SERVICE_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x08, 0x0C, 0x93, 0x0E, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
 
+// CODE_FACTORY_COMMANDO, COMMAND 0x09 with EXT_COMMAND 0x52 (CODE_FACTORY = 82),
+// and the re-lock built the same way CODE_SERVICE_STOP is - COMMAND 0x1F with the
+// factory EXT byte instead of the service one.
+//
+// This is the unlock level Recom reaches after the 0012 PIN, the one where dF/dU
+// become editable. No version of this component has ever sent it: every write it
+// has made used CODE_SERVICE (0x08/0x0C), which this board ACKs, stores and then
+// declines to adopt, leaving the PCU running its old set and raising Blocking 0
+// at the next identification. Recom writing p25..p28 to this same appliance from
+// factory level changed them cleanly, with no blocking at all.
+//
+// COMMAND 0x09 and EXT 0x52 are both out of Recom's own tables. Their pairing is
+// inferred from the symmetry with 0x08/0x0C, and the re-lock is a guess; the
+// board may well NAK one or both. That is why test_factory_mode() exists and why
+// send_command() will build any other combination you want to try.
+static const uint8_t CMD_FACTORY_ON_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x09, 0x52, 0x2E, 0xA6, 0x03};
+static const uint8_t CMD_FACTORY_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x1F, 0x52, 0x20, 0xC6, 0x03};
+static const uint8_t CMD_FACTORY_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x09, 0x52, 0x13, 0x66, 0x03};
+static const uint8_t CMD_FACTORY_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x52, 0x1D, 0x06, 0x03};
+
 // RESET, COMMAND 0x31 with EXT_COMMAND NONE, addressed to the PCU. Recom's
 // command table has it; nothing in the decompiled write path sends it, and this
 // board has never been asked for it, so what it does is unverified - a warm
@@ -565,6 +585,26 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
       *cmd = CMD_RESET_REMEHA;
       *len = sizeof(CMD_RESET_REMEHA);
       break;
+    case DIETRICH_REQ_FACTORY_ON:
+      *cmd = CMD_FACTORY_ON_REMEHA;
+      *len = sizeof(CMD_FACTORY_ON_REMEHA);
+      break;
+    case DIETRICH_REQ_FACTORY_OFF:
+      *cmd = CMD_FACTORY_OFF_REMEHA;
+      *len = sizeof(CMD_FACTORY_OFF_REMEHA);
+      break;
+    case DIETRICH_REQ_FACTORY_ON_EE:
+      *cmd = CMD_FACTORY_ON_REMEHA_EE;
+      *len = sizeof(CMD_FACTORY_ON_REMEHA_EE);
+      break;
+    case DIETRICH_REQ_FACTORY_OFF_EE:
+      *cmd = CMD_FACTORY_OFF_REMEHA_EE;
+      *len = sizeof(CMD_FACTORY_OFF_REMEHA_EE);
+      break;
+    case DIETRICH_REQ_RAW:
+      *cmd = this->raw_buf_;
+      *len = this->raw_len_;
+      break;
     case DIETRICH_REQ_IDENT_PCU:
       *cmd = CMD_IDENT_REMEHA_PCU;
       *len = sizeof(CMD_IDENT_REMEHA_PCU);
@@ -728,6 +768,19 @@ void Dietrich::decode_sample_() {
                "take effect, EEPROM writes will be ignored",
                b62);
     }
+  }
+
+  // The same readback for the factory-level unlock, and deliberately without a
+  // verdict. Byte 63 is known to track CODE_SERVICE; nothing is known to track
+  // CODE_FACTORY, and byte 62 - which the P3 map calls service_mode and which has
+  // never been seen to move - is the obvious candidate but only a candidate. So
+  // report both bytes and let the reading decide what the command did. If byte 62
+  // moves here, that is the finding.
+  if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_FACTORY_TEST && this->have_(63, 1)) {
+    ESP_LOGI(TAG,
+             "factory mode readback: byte 62 = %u, byte 63 = %u (62 is the candidate flag, 63 is the one "
+             "CODE_SERVICE moves)",
+             static_cast<unsigned>(this->d_(62)), static_cast<unsigned>(this->d_(63)));
   }
 
   // Samples taken inside a transaction are deliberately excluded: the boot check
@@ -912,6 +965,10 @@ void Dietrich::decode_params_() {
 }
 
 uint32_t Dietrich::timeout_for_(DietrichRequest req) {
+  // A raw frame may well be a write, and an unknown command may take as long as
+  // one, so give it the longer budget rather than calling it a timeout early.
+  if (req == DIETRICH_REQ_RAW)
+    return WRITE_TIMEOUT_MS;
   return is_write_req_(req) ? WRITE_TIMEOUT_MS : RESPONSE_TIMEOUT_MS;
 }
 
@@ -1185,6 +1242,182 @@ bool Dietrich::test_service_mode() {
   return this->stage_txn_(DIETRICH_TXN_SERVICE_TEST, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "service mode test");
 }
 
+bool Dietrich::test_factory_mode() {
+  return this->stage_txn_(DIETRICH_TXN_FACTORY_TEST, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0,
+                          "factory mode test (COMMAND 0x09 / EXT 0x52)");
+}
+
+// Hex text to bytes. Spaces, colons and dashes are skipped so a frame can be
+// pasted in whatever shape it was written down in; anything else is an error,
+// and so is an odd number of digits.
+bool Dietrich::parse_hex_(const std::string &hex, uint8_t *out, size_t max, size_t *len) {
+  size_t n = 0;
+  int hi = -1;
+  for (size_t i = 0; i < hex.size(); i++) {
+    const char c = hex[i];
+    if (c == ' ' || c == ':' || c == '-' || c == '\t')
+      continue;
+    int v;
+    if (c >= '0' && c <= '9')
+      v = c - '0';
+    else if (c >= 'a' && c <= 'f')
+      v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F')
+      v = c - 'A' + 10;
+    else
+      return false;
+    if (hi < 0) {
+      hi = v;
+    } else {
+      if (n >= max)
+        return false;
+      out[n++] = static_cast<uint8_t>((hi << 4) | v);
+      hi = -1;
+    }
+  }
+  if (hi >= 0)
+    return false;
+  *len = n;
+  return true;
+}
+
+// 02 | FE | dst | 05 | len | cmd | ext | data.. | CRClo CRChi | 03
+//
+// The length byte and the CRC are computed here, so the only things that can be
+// wrong are the ones being tested: the recipient, the command and its payload.
+bool Dietrich::build_and_stage_command_(uint8_t dst, uint8_t cmd, uint8_t ext, const uint8_t *data,
+                                        size_t data_len) {
+  const size_t len = 7 + data_len + 3;  // header + data + CRC16 + ETX
+  if (len > DIETRICH_RAW_FRAME_MAX) {
+    ESP_LOGW(TAG, "send_command refused: %u data bytes makes a frame longer than the %u byte limit",
+             static_cast<unsigned>(data_len), static_cast<unsigned>(DIETRICH_RAW_FRAME_MAX));
+    return false;
+  }
+
+  uint8_t f[DIETRICH_RAW_FRAME_MAX];
+  f[0] = 0x02;
+  f[1] = 0xFE;  // sender: the PC
+  f[2] = dst;
+  f[3] = 0x05;  // request
+  f[4] = static_cast<uint8_t>(len - 2);
+  f[5] = cmd;
+  f[6] = ext;
+  memcpy(f + 7, data, data_len);
+  const uint16_t crc = crc16_(f, 1, len - 3);
+  f[len - 3] = static_cast<uint8_t>(crc & 0xFF);
+  f[len - 2] = static_cast<uint8_t>(crc >> 8);
+  f[len - 1] = 0x03;
+
+  char what[72];
+  snprintf(what, sizeof(what), "raw COMMAND 0x%02X / EXT 0x%02X -> 0x%02X", static_cast<unsigned>(cmd),
+           static_cast<unsigned>(ext), static_cast<unsigned>(dst));
+  if (!this->stage_txn_(DIETRICH_TXN_RAW, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, what))
+    return false;
+
+  // Only after stage_txn_() has agreed to it, so a refused call cannot overwrite
+  // the frame a transaction already in flight is sending.
+  memcpy(this->raw_buf_, f, len);
+  this->raw_len_ = len;
+  ESP_LOGI(TAG, "  frame: %s", hex_str_(f, len).c_str());
+  return true;
+}
+
+bool Dietrich::send_command(uint8_t dst, uint8_t cmd, uint8_t ext, const std::string &data_hex) {
+  uint8_t data[DIETRICH_RAW_FRAME_MAX];
+  size_t data_len = 0;
+  if (!parse_hex_(data_hex, data, sizeof(data), &data_len)) {
+    ESP_LOGW(TAG, "send_command refused: \"%s\" is not an even-length run of hex bytes", data_hex.c_str());
+    return false;
+  }
+  return this->build_and_stage_command_(dst, cmd, ext, data, data_len);
+}
+
+// "01 09 52" or "01 37 00 0C 00" - recipient, command, ext, then the payload.
+bool Dietrich::send_command_hex(const std::string &spec) {
+  uint8_t b[DIETRICH_RAW_FRAME_MAX];
+  size_t n = 0;
+  if (!parse_hex_(spec, b, sizeof(b), &n)) {
+    ESP_LOGW(TAG, "send_command refused: \"%s\" is not an even-length run of hex bytes", spec.c_str());
+    return false;
+  }
+  if (n < 3) {
+    ESP_LOGW(TAG, "send_command refused: \"%s\" needs at least recipient, command and ext - e.g. \"01 09 52\"",
+             spec.c_str());
+    return false;
+  }
+  return this->build_and_stage_command_(b[0], b[1], b[2], b + 3, n - 3);
+}
+
+// The bytes exactly as given, for replaying something captured off Recom. A bad
+// CRC or bad framing is reported and sent anyway - a frame the board refuses is
+// a result, and refusing to send it here would only hide that.
+bool Dietrich::send_raw(const std::string &hex) {
+  uint8_t f[DIETRICH_RAW_FRAME_MAX];
+  size_t len = 0;
+  if (!parse_hex_(hex, f, sizeof(f), &len)) {
+    ESP_LOGW(TAG, "send_raw refused: \"%s\" is not an even-length run of hex bytes, or is over %u bytes",
+             hex.c_str(), static_cast<unsigned>(DIETRICH_RAW_FRAME_MAX));
+    return false;
+  }
+  if (len < REMEHA_MIN_FRAME) {
+    ESP_LOGW(TAG, "send_raw refused: %u bytes is shorter than the %u byte minimum frame",
+             static_cast<unsigned>(len), static_cast<unsigned>(REMEHA_MIN_FRAME));
+    return false;
+  }
+
+  if (!this->stage_txn_(DIETRICH_TXN_RAW, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "raw frame"))
+    return false;
+
+  if (f[0] != 0x02 || f[len - 1] != 0x03)
+    ESP_LOGW(TAG, "  note: this frame does not start with 0x02 and end with 0x03");
+  if (crc16_(f, 1, len - 3) != static_cast<uint16_t>(f[len - 3] | (f[len - 2] << 8)))
+    ESP_LOGW(TAG, "  note: the CRC in this frame is not the one this component would compute - sending it as given");
+
+  memcpy(this->raw_buf_, f, len);
+  this->raw_len_ = len;
+  ESP_LOGI(TAG, "  frame: %s", hex_str_(f, len).c_str());
+  return true;
+}
+
+// Everything response_error_() would have thrown the frame out for, reported
+// instead. Each line is a fact about the reply, so a guessed command that comes
+// back NAKed still tells you the board parsed it and knew what it was.
+void Dietrich::log_raw_reply_() const {
+  if (this->rx_len_ == 0) {
+    ESP_LOGW(TAG, "raw frame: no reply at all - the board did not answer inside %u ms",
+             static_cast<unsigned>(WRITE_TIMEOUT_MS));
+    return;
+  }
+  if (this->rx_len_ < REMEHA_MIN_FRAME) {
+    ESP_LOGW(TAG, "raw frame: reply is %u bytes, short of the %u byte minimum frame - nothing to decode",
+             static_cast<unsigned>(this->rx_len_), static_cast<unsigned>(REMEHA_MIN_FRAME));
+    return;
+  }
+
+  const uint8_t type = this->rx_buf_[3];
+  const char *verdict = type == REMEHA_TYPE_RESPONSE
+                            ? "a response (type 0x06)"
+                            : (type == REMEHA_TYPE_NAK ? "a NAK (type 0x15) - parsed and refused"
+                                                       : "neither a response nor a NAK");
+  const bool framed = this->rx_buf_[0] == 0x02 && this->rx_buf_[this->rx_len_ - 1] == 0x03;
+  const bool crc_ok = is_valid_crc_(this->rx_buf_, this->rx_len_);
+  const bool swapped =
+      this->raw_len_ >= 3 && this->rx_buf_[1] == this->raw_buf_[2] && this->rx_buf_[2] == this->raw_buf_[1];
+  const bool echoed =
+      this->raw_len_ >= 7 && this->rx_buf_[5] == this->raw_buf_[5] && this->rx_buf_[6] == this->raw_buf_[6];
+
+  ESP_LOGI(TAG, "raw frame: %s; framing %s, CRC %s, addresses %s, COMMAND/EXT %s", verdict, framed ? "ok" : "BAD",
+           crc_ok ? "ok" : "BAD", swapped ? "swapped" : "NOT swapped", echoed ? "echoed" : "NOT echoed");
+
+  const size_t overhead = this->header_len_() + this->trailer_len_();
+  if (this->rx_len_ > overhead) {
+    ESP_LOGI(TAG, "  %u data byte(s): %s", static_cast<unsigned>(this->rx_len_ - overhead),
+             hex_str_(this->rx_buf_ + this->header_len_(), this->rx_len_ - overhead).c_str());
+  } else {
+    ESP_LOGI(TAG, "  no data bytes - a bare acknowledgement");
+  }
+}
+
 bool Dietrich::write_block_unchanged(uint8_t block) {
   char what[48];
   snprintf(what, sizeof(what), "identity write of block 0x%02X", static_cast<unsigned>(block));
@@ -1259,6 +1492,33 @@ void Dietrich::start_txn_() {
       this->txn_relock_pos_ = n;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF_EE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      // A boot that finds the board unlocked cannot tell which level left it
+      // that way - sample byte 63 tracks the service unlock and nothing is known
+      // to track the factory one. When writes go out at factory level, put both
+      // levels back on both addresses rather than guess.
+      if (this->use_factory_mode_) {
+        this->queue_[n++] = DIETRICH_REQ_FACTORY_OFF_EE;
+        this->queue_[n++] = DIETRICH_REQ_FACTORY_OFF;
+      }
+      break;
+    case DIETRICH_TXN_FACTORY_TEST:
+      // The exact shape of TXN_SERVICE_TEST, one level up, and both addresses:
+      // which of them answers COMMAND 0x09 at all is the first thing worth
+      // knowing. The sample in the middle is the only way to see whether the
+      // unlock did anything - byte 62 is the candidate flag, byte 63 being the
+      // one that already tracks the service unlock.
+      this->queue_[n++] = DIETRICH_REQ_FACTORY_ON;
+      this->queue_[n++] = DIETRICH_REQ_FACTORY_ON_EE;
+      this->queue_[n++] = DIETRICH_REQ_SAMPLE;
+      this->txn_relock_pos_ = n;
+      this->queue_[n++] = DIETRICH_REQ_FACTORY_OFF_EE;
+      this->queue_[n++] = DIETRICH_REQ_FACTORY_OFF;
+      break;
+    case DIETRICH_TXN_RAW:
+      // One frame, nothing unlocked, nothing to put back. txn_relock_pos_ stays
+      // 0, and the reply is never counted as a failure, so there is nothing to
+      // skip to and nothing to retry.
+      this->queue_[n++] = DIETRICH_REQ_RAW;
       break;
     case DIETRICH_TXN_SERVICE_TEST:
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
@@ -1294,8 +1554,11 @@ void Dietrich::start_txn_() {
       // how this component came to brick a boiler for three hours on 2026-09-16.
       // See mapping/pcu05_p3_protocol.md, *What cleared it*.
       this->queue_[n++] = DIETRICH_REQ_SAMPLE;
-      this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
-      this->queue_[n++] = DIETRICH_REQ_SERVICE_ON_EE;
+      // Service level or factory level, never both: Recom asks for the PIN and is
+      // then in factory level, it does not hold two unlocks at once. Which one
+      // this is comes from use_factory_mode on the component.
+      this->queue_[n++] = this->use_factory_mode_ ? DIETRICH_REQ_FACTORY_ON : DIETRICH_REQ_SERVICE_ON;
+      this->queue_[n++] = this->use_factory_mode_ ? DIETRICH_REQ_FACTORY_ON_EE : DIETRICH_REQ_SERVICE_ON_EE;
       for (uint8_t i = 0; i < count; i++)
         this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
       for (uint8_t i = 0; i < count; i++)
@@ -1303,8 +1566,8 @@ void Dietrich::start_txn_() {
       for (uint8_t i = 0; i < count; i++)
         this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
       this->txn_relock_pos_ = n;
-      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF_EE;
-      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      this->queue_[n++] = this->use_factory_mode_ ? DIETRICH_REQ_FACTORY_OFF_EE : DIETRICH_REQ_SERVICE_OFF_EE;
+      this->queue_[n++] = this->use_factory_mode_ ? DIETRICH_REQ_FACTORY_OFF : DIETRICH_REQ_SERVICE_OFF;
       this->queue_[n++] = DIETRICH_REQ_SAMPLE;
       break;
   }
@@ -1333,6 +1596,12 @@ void Dietrich::finish_txn_() {
       break;
     case DIETRICH_TXN_RESET:
       kind = "board reset";
+      break;
+    case DIETRICH_TXN_FACTORY_TEST:
+      kind = "factory mode test";
+      break;
+    case DIETRICH_TXN_RAW:
+      kind = "raw frame";
       break;
     default:
       break;
@@ -1448,6 +1717,21 @@ bool Dietrich::handle_response_() {
       case DIETRICH_REQ_RESET:
         what = "reset";
         break;
+      case DIETRICH_REQ_FACTORY_ON:
+        what = "factory mode on";
+        break;
+      case DIETRICH_REQ_FACTORY_OFF:
+        what = "factory mode off";
+        break;
+      case DIETRICH_REQ_FACTORY_ON_EE:
+        what = "factory mode on (EEPROM)";
+        break;
+      case DIETRICH_REQ_FACTORY_OFF_EE:
+        what = "factory mode off (EEPROM)";
+        break;
+      case DIETRICH_REQ_RAW:
+        what = "raw frame";
+        break;
       case DIETRICH_REQ_IDENT_PCU:
         what = "identification 0x01";
         break;
@@ -1466,6 +1750,14 @@ bool Dietrich::handle_response_() {
 
   ESP_LOGD(TAG, "%s data (%u bytes): %s", what, static_cast<unsigned>(this->rx_len_),
            hex_str_(this->rx_buf_, this->rx_len_).c_str());
+
+  // A raw probe has no notion of failure. The frame being sent is usually a
+  // guess, so a NAK, a truncated reply or silence are the answer rather than an
+  // error - report what came back and let the transaction end cleanly.
+  if (req == DIETRICH_REQ_RAW) {
+    this->log_raw_reply_();
+    return true;
+  }
 
   if (this->rx_len_ == 0) {
     // Recom treats a timed-out write as a success; see the note in

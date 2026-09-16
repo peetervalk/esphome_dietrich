@@ -304,4 +304,11 @@ offset 8 of the counter block in the same dump, which the component scales x2 in
 None of it is needed to read or write parameters. The second sweep answered the one
 question this list was worth re-running for: `0x60`–`0x64` do **not** change when a
 parameter is written, so they are not the parameter store's integrity data and the
-`Blocking 0` still has no explanation on the EEPROM.
+`Blocking 0` still has no explanation on the EEPROM - and that now looks like the
+answer rather than a gap. The CRC search above was later redone with the board's own
+verified convention (poly `0xA001`, init `0xFFFF`, LSB first, the one that reproduces
+the counter block and record `0x40`) over every range of the parameter image and across
+both 2 KB stores, and there is no parameter checksum anywhere in either. What the PCU
+compares the stored set against is not on the bus: it is the set the PCU is itself
+running, and a write made at service level never replaces it. See *Service level is not
+the commissioning unlock* in `pcu05_p3_protocol.md`.

@@ -26,6 +26,7 @@ Dietrich = dietrich_ns.class_("Dietrich", cg.PollingComponent, uart.UARTDevice)
 
 CONF_VARIANT = "variant"
 CONF_ALLOW_WRITES = "allow_writes"
+CONF_USE_FACTORY_MODE = "use_factory_mode"
 DietrichVariant = dietrich_ns.enum("DietrichVariant")
 VARIANTS = {
     "mcr3": DietrichVariant.DIETRICH_VARIANT_MCR3,
@@ -275,6 +276,14 @@ def _validate_writes(config):
             f"not {config[CONF_VARIANT]} - the parameter map is specific to "
             f"that parameter set"
         )
+    # Factory level is a way of writing, not a thing on its own: it only takes
+    # effect inside a write transaction, so asking for it without allow_writes
+    # is a config that silently does nothing.
+    if config[CONF_USE_FACTORY_MODE] and not config[CONF_ALLOW_WRITES]:
+        raise cv.Invalid(
+            f"{CONF_USE_FACTORY_MODE} needs {CONF_ALLOW_WRITES} - it chooses "
+            f"which unlock a write uses, and does nothing on its own"
+        )
     return config
 
 
@@ -288,6 +297,15 @@ CONFIG_SCHEMA = cv.All(
             # every write method refuses and says so in the log. See
             # mapping/pcu05_p3_protocol.md for what writing involves.
             cv.Optional(CONF_ALLOW_WRITES, default=False): cv.boolean,
+            # Which unlock a parameter write uses: CODE_SERVICE (0x08/0x0C) by
+            # default, or CODE_FACTORY (0x09/0x52) when this is set. Service
+            # level is what every write this component has made so far used, and
+            # a PCU-05 P3 ACKs those, stores them and then refuses to adopt them
+            # - see mapping/pcu05_p3_protocol.md. Factory level is what Recom
+            # reaches after its PIN. The command pairing is inferred, not
+            # captured, so this is off by default and test_factory_mode() is the
+            # thing to try first.
+            cv.Optional(CONF_USE_FACTORY_MODE, default=False): cv.boolean,
             **{cv.Optional(key): schema for key, schema in SENSOR_SCHEMAS.items()},
             **{cv.Optional(key): schema for key, schema in BINARY_SENSOR_SCHEMAS.items()},
             **{cv.Optional(key): schema for key, schema in TEXT_SENSOR_SCHEMAS.items()},
@@ -305,6 +323,7 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
     cg.add(var.set_variant(config[CONF_VARIANT]))
     cg.add(var.set_allow_writes(config[CONF_ALLOW_WRITES]))
+    cg.add(var.set_use_factory_mode(config[CONF_USE_FACTORY_MODE]))
 
     for key in SENSOR_SCHEMAS:
         if key in config:
