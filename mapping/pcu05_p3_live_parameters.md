@@ -158,3 +158,10 @@ above and go back verbatim whatever they mean.
 2026-09-16 14:23:14 wrote **p33 = 6** (byte 32, `0x04` -> `0x06`), verified by
 read-back. Every other byte of the 128 went back identical. The boiler reported
 `Blocking 0` fourteen seconds later. Nothing has been written since.
+
+The full EEPROM sweep at 15:50 re-read all eight blocks and confirms it from the
+other side: the image above and the one on the boiler now differ at **byte 32 and
+nowhere else**, so the write is still in place and took nothing else with it. The
+sweep also rules the obvious culprit out - the parameter block carries no checksum
+that the write could have left stale. See
+[`pcu05_p3_eeprom_map.md`](pcu05_p3_eeprom_map.md).

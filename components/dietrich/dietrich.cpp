@@ -762,7 +762,8 @@ std::string Dietrich::text_(size_t off, size_t len) const {
 //     answers with - device type, versions, operating hours, connected device
 //     types, last blocking and locking codes, and a 5 byte serial number.
 //   group 1, 64 data bytes: the appliance identity - dF/dU codes, a 16 character
-//     serial number and the boiler name. Not observed yet from either address.
+//     serial number and the boiler name. What 0x00 answers with; it is EEPROM
+//     blocks 0x10..0x13 of that address verbatim.
 //
 // Logged rather than published: commissioning data, read once against the
 // identification plate, not a measurement.

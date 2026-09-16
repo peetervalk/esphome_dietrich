@@ -164,6 +164,13 @@ The two counter requests already in `dietrich.cpp` (`…08 10 1C…`, `…08 10 
 EEPROM reads of blocks 28 and 29 — the component has been using the EEPROM read
 command all along without naming it.
 
+Those two rows are what Recom's call sites give away. The whole 2 KB has since been
+swept at both addresses and is mapped in
+[`pcu05_p3_eeprom_map.md`](pcu05_p3_eeprom_map.md): identification group 1 at
+`0x10`–`0x13`, the blocking and locking history rings at `0x20`–`0x2F` and
+`0x30`–`0x3F`, a CRC16 on the counter block, and the fact that `0x1E`–`0x1F` is a
+mirror of `0x1C`–`0x1D` rather than 32 more bytes of counters.
+
 ## Reading a parameter
 
 Plain `READ_EPROM_BLOCK`, no unlock needed:
@@ -589,10 +596,33 @@ only in groups 2-4, and 56 600 operating hours sits plausibly between the same
 board's *hours run pump* (62 222) and *power supply available* (64 832) counters,
 which it would not under group 3's `x 8`.
 
-`0x00` answered nothing at all, so **no address has yet served group 1**, and the
-dF/dU codes have not been read off this board over the wire. The identification
-plate remains the only source for them. Recom presumably gets group 1 somewhere -
-`CODE_FACTORY_COMMANDO` (`0x09`, EXT `0x52`) is the obvious place left to look.
+`0x00` answered nothing at all on that capture. **It does now.** At 15:49:45 the same
+request to `0x00` came back with 64 data bytes — group 1, the appliance identity:
+
+```
+0200FE06 48 010B 0D1302FFFF17FF037C0200FFFFFFFFFF0405FF01FFFFFFFF0BFFFFFFFFFFFFFF
+                 31383332373230313033383430202020547A65727261204578706F7274202020 4FD2 03
+```
+
+| Field | Value |
+|---|---|
+| dF-code | **19** |
+| dU-code | **2** |
+| Software version / parameter version / parameter type | 23 / 255 / 3 |
+| Next service code | 0 |
+| Connected PSU / PCU / SCU-C | 4 / 5 / 255 |
+| Serial number | `1832720103840` |
+| Boiler name | `Tzerra Export` |
+
+So the dF/dU codes *are* readable over the wire and the identification plate is no
+longer the only source for them — which matters, because reloading the factory
+parameter set after a `Blocking 0` is keyed on exactly those two numbers.
+`CODE_FACTORY_COMMANDO` never had to be tried.
+
+Those 64 bytes are EEPROM blocks `0x10`–`0x13` at `0x00` concatenated, byte for byte,
+and the 16 bytes `0x01` answers with are block `01:00` at that address. Identification
+is a read of a known EEPROM range and nothing more. See
+[`pcu05_p3_eeprom_map.md`](pcu05_p3_eeprom_map.md).
 
 *Parameter version reads `0xFF`.* Worth writing down next to a `Blocking 0` (*PCU
 parameter fault*), and worth not reading too much into: there is no capture from
@@ -604,6 +634,12 @@ on connect, and `read_identification()` asks again. Read-only, and therefore not
 gated behind `allow_writes`.
 
 ### The rest of the EEPROM, and where group 1 has to be
+
+> **Answered.** Both addresses were swept end to end on 2026-09-16 and the findings
+> are in [`pcu05_p3_eeprom_map.md`](pcu05_p3_eeprom_map.md). Group 1 is blocks
+> `0x10`–`0x13` at `0x00`, the blocking history is `0x20`–`0x2F` and the locking
+> history `0x30`–`0x3F`, both rings of 16 records in exactly the layout predicted
+> below. What follows is the reasoning that went looking for them.
 
 `EEPROMSize` in `PCU-05_P3.xml` is 2048 bytes, so the EEPROM is **128 blocks**,
 `0x00`..`0x7F`. Twelve of them are mapped - `0x14`..`0x1B` parameters, `0x1C`..`0x1F`
@@ -636,14 +672,23 @@ operating hours in its identification reply, so a blocking record carrying a
 and either place it at the 2026-09-16 write or clear the write of it. The state,
 sub-state and temperatures at the time come with it.
 
+The sweep found the records and they decode in exactly this layout — but **no slot
+in either ring carries code 0**, and the newest blocking is stamped 382 hours before
+the sweep. A *PCU parameter fault* never enters the blocking history, so the history
+cannot date the write either way. The stamp turned out to run on the *Power supply
+available hrs* counter (64 832), not the 56 600 the identification reports.
+
 #### Last blocking code
 
 The identification reply's byte 8 is *Last blocking code* and read **1**
 (*T Flow > max.*) while the sample reported the current blocking as **0**. So the
 field is not a copy of the live status byte. Either it lags, or it records only
 faults that have cleared, or parameter faults do not go into it at all - the map
-does not say, and one reading cannot tell them apart. The history records above are
-what would settle it. The companion *Last locking code* read 36 (*5x Flame loss*),
+does not say, and one reading cannot tell them apart. The history records settled
+it: **the field is the newest entry of the blocking ring** (code 1 at block `0x2B`,
+stamped 382 hours earlier), and the third reading was the right one - a parameter
+fault is never written to the ring, so it can never reach this field either. The
+companion *Last locking code* read 36 (*5x Flame loss*),
 which suits a board with 139 flame losses and 261 failed starts on its counters.
 
 #### Sweeping it
@@ -657,6 +702,12 @@ borrows the poll intervals it needs, about 45 seconds for the full 2 KB.
 
 Both addresses are worth sweeping: they answer `READ_EPROM_BLOCK` with different
 contents, as `0x14`..`0x1B` already showed.
+
+Done on 2026-09-16, both addresses, all 128 blocks each, in
+`mapping/eeprom_dump_260916.txt`. Every request was answered - no block is declined
+by either device, so an `FF` block is empty rather than refused - and 62 blocks at
+`0x00` and 11 at `0x01` hold data. The decode is
+[`pcu05_p3_eeprom_map.md`](pcu05_p3_eeprom_map.md).
 
 ### A re-lock that goes unanswered is not a failed write
 

@@ -275,8 +275,8 @@ button:
   # Who both devices think they are. Sent once at boot anyway; this asks again.
   # 0x01 answers the 16 byte per-device layout - device type, versions,
   # operating hours, connected device types and the last blocking and locking
-  # codes. The 64 byte appliance layout carrying the dF/dU codes has not been
-  # seen from either address; see mapping/pcu05_p3_protocol.md.
+  # codes. 0x00 answers the 64 byte appliance layout - dF/dU codes, the full
+  # serial number and the boiler name; see mapping/pcu05_p3_protocol.md.
   - platform: template
     name: "Boiler identification"
     entity_category: diagnostic
@@ -285,10 +285,12 @@ button:
 
   # Walk the whole 2 KB EEPROM and log every block, hex and ASCII. 128 blocks at
   # roughly a third of a second each, so about 45 seconds, and it borrows the
-  # poll intervals it needs. Only 0x14..0x1B (parameters) and 0x1C..0x1F
-  # (counters) are mapped - the other 108 blocks are where the appliance
-  # identification and the fault history records have to be. The history records
-  # are 16 bytes each, exactly one block, and carry an operating-hours stamp.
+  # poll intervals it needs. Both addresses have been swept once already and the
+  # decode is in mapping/pcu05_p3_eeprom_map.md - parameters at 0x14..0x1B,
+  # counters at 0x1C..0x1D (mirrored at 0x1E..0x1F), appliance identification at
+  # 0x10..0x13, and the blocking and locking history rings at 0x20..0x3F. Sweep
+  # again to see what moved: the fault rings and 0x60..0x64 are the interesting
+  # parts.
   - platform: template
     name: "Boiler dump EEPROM 0x00"
     entity_category: diagnostic

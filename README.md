@@ -64,15 +64,19 @@ and needs no configuration. The answer goes to the log:
 [I][dietrich]:   operating hours 56600, connected SU type 1, connected PSU type 4
 [I][dietrich]:   last blocking code 1, last locking code 36
 [I][dietrich]:   serial number (raw): FF FF FF FF FF
+[I][dietrich]: identification 0x00: dF-code 19, dU-code 2 (compare these with the identification plate)
+[I][dietrich]:   software version 23, parameter version 255, parameter type 3 (raw bytes)
+[I][dietrich]:   next service code 0, connected PSU type 4, connected PCU type 5, SCU-C 255
+[I][dietrich]:   serial number: 1832720103840
+[I][dietrich]:   boiler name: Tzerra Export
 ```
 
 The reply's length picks the layout. A PCU-05 P3 answers at `0x01` with the 16-byte
-per-device form above; the 64-byte appliance form, which is the one carrying the
-**dF/dU codes**, the serial number and the boiler name, has not been seen from
-either address yet — the component decodes it if it ever arrives. Those codes are
-the ones printed on the identification plate and the ones a factory-settings restore
-asks for, and they are **not** in the parameter block, so no parameter write can
-disturb them. See
+per-device form and at `0x00` with the 64-byte appliance form, which is the one
+carrying the **dF/dU codes**, the full serial number and the boiler name. Those
+codes are the ones printed on the identification plate and the ones a
+factory-settings restore asks for, and they are **not** in the parameter block, so
+no parameter write can disturb them. See
 [mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md) for both layouts.
 
 To ask again, e.g. from a diagnostic button, `read_identification()` sends it on the
@@ -290,6 +294,14 @@ one XML per boiler and parameter set, `language.xml` for the string table, and
 `mapping/pcu05_p3_fieldmap.md` is the resolved, human-readable field map for the
 PCU-05 P3 and `mapping/pcu05_p3_datamap.json` the machine-readable form used to
 generate the code tables.
+
+Alongside them, from an actual board rather than from Recom:
+[`mapping/pcu05_p3_protocol.md`](mapping/pcu05_p3_protocol.md) for the wire protocol
+and the write path, [`mapping/pcu05_p3_eeprom_map.md`](mapping/pcu05_p3_eeprom_map.md)
+for the full 2 KB EEPROM of both device addresses — parameters, counters, appliance
+identification and the blocking and locking history rings — and
+[`mapping/pcu05_p3_live_parameters.md`](mapping/pcu05_p3_live_parameters.md) for one
+appliance's commissioned parameter image.
 
 ## Credits
 
