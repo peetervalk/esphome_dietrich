@@ -277,22 +277,26 @@ sensor:
 # while pressing these - that is where the result is reported.
 # ---------------------------------------------------------------------------
 # button:
-#   # 1. Unlock service mode and immediately re-lock it, writing nothing at all.
-#   #    Sample byte 62 - the `service_mode` sensor - reports the state, so this
-#   #    exercises the unlock path at no risk. Expect two ACKs in the log and
-#   #    "service mode test finished, nothing was written".
+#   # 1. Unlock service mode, read one sample while unlocked, re-lock. Writes
+#   #    nothing at all. The unlock's ACK carries no payload, so it only proves
+#   #    the frame parsed - sample byte 62 is what reports whether service mode
+#   #    actually engaged. Look for either
+#   #      "service mode readback: byte 62 = 1, the unlock took effect"
+#   #    or "byte 62 = 0, the unlock was ACKed but did NOT take effect".
+#   #    On a PCU-05 P3 this is the question to settle before anything else: a
+#   #    single-block write has been seen ACKed and ignored on that board.
 #   - platform: template
 #     name: "Boiler service mode self-test"
 #     entity_category: diagnostic
 #     on_press:
 #       - lambda: 'id(boiler).test_service_mode();'
 #
-#   # 2. Read EEPROM block 0x16 and write it straight back, byte for byte. This
-#   #    is the first frame that actually writes, and it changes nothing - the
-#   #    cheapest possible way to find out what an accepted (or a rejected)
-#   #    write looks like on this bus, which is the one thing the protocol notes
-#   #    could not establish from Recom's code alone. Expect "identity write of
-#   #    block 0x16 verified".
+#   # 2. Read EEPROM block 0x16 and write it straight back, byte for byte. Safe,
+#   #    because it changes nothing - but note what it cannot tell you: writing
+#   #    identical bytes reads back identical either way, so "identity write of
+#   #    block 0x16 verified" means the frame was accepted, NOT that the board
+#   #    applied it. Use it to check the frame is well formed, not to conclude
+#   #    that writing works.
 #   - platform: template
 #     name: "Boiler identity write block 0x16"
 #     entity_category: diagnostic
@@ -305,6 +309,11 @@ sensor:
 #   #    to the documented 2..15, and a write is skipped entirely when the
 #   #    boiler already holds that value - so pressing this twice costs one
 #   #    EEPROM cycle, not two.
+#   #
+#   #    A PCU-05 P3 has been observed ACKing this write and leaving p33 alone,
+#   #    which the component reports as "was ACKed but reads back different".
+#   #    That is the boiler declining, not a bug in the frame - see
+#   #    mapping/pcu05_p3_protocol.md.
 #   - platform: template
 #     name: "Boiler set DHW hysteresis to 6"
 #     entity_category: config

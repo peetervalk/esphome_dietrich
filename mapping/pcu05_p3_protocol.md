@@ -204,10 +204,15 @@ block `0x16` sent as above it should read:
 02 01 FE 06 08 11 16 <CRClo> <CRChi> 03
 ```
 
-Recom rewrites all 8 blocks; nothing stops a single-block write, but **read the block
-first and modify one byte**, since the other 15 bytes go back verbatim. Read it inside
-the write transaction — a cached copy may be stale, and writing it back would silently
-revert 15 unrelated parameters.
+Recom rewrites all 8 blocks. Always **read the block first and modify one byte**,
+since the other 15 bytes go back verbatim, and read it inside the write transaction
+— a cached copy may be stale, and writing it back would silently revert 15
+unrelated parameters.
+
+> An earlier revision of this document added “nothing stops a single-block write”.
+> **Hardware says otherwise** — see *A single-block write is ACKed and ignored*
+> below. Recom writing all 8 blocks every time now looks like a requirement rather
+> than laziness.
 
 ### Two bugs in Recom worth not copying
 
@@ -229,10 +234,51 @@ revert 15 unrelated parameters.
   problem, not a comfort one. `ValidateDataModel` exists because Recom clamps every
   value to the XML `min`/`max` before sending — do the same.
 - EEPROM endurance is finite. This is not somewhere to write on a schedule.
-- What a *rejected* write looks like is still unknown — byte `[3]` set to something
-  other than `0x06`, or silence. The safe way to find out is to write a block back
-  unchanged and watch what comes home, which is what
-  `Dietrich::write_block_unchanged()` exists for.
+- A write this board declines is **not** signalled: it comes back as an ordinary,
+  correctly formed ACK and simply does not happen. Never treat an ACK as proof that
+  a value changed; read the block back and compare.
+
+### A single-block write is ACKed and ignored
+
+Observed on a live PCU-05 P3 on 2026-09-16, driving the sequence in this document
+exactly. Every frame validated — CRC, length byte, swapped addresses and echoed
+COMMAND/EXT_COMMAND, in both directions:
+
+```
+-> 02 FE 01 05 08 08 0C AE CE 03                                   CODE_SERVICE_START
+<- 02 01 FE 06 08 08 0C AE 91 03                                   ACK
+-> 02 FE 00 05 08 10 16 18 C5 03                                   READ_EPROM_BLOCK 0x16
+<- 02 00 FE 06 18 10 16 04 00 01 01 ... FF  29 BC 03               p33 = 4
+-> 02 FE 01 05 18 11 16 06 00 01 01 ... FF  36 D5 03               WRITE_EPROM_BLOCK 0x16, p33 = 6
+<- 02 01 FE 06 08 11 16 24 CA 03                                   ACK
+-> 02 FE 00 05 08 10 16 18 C5 03                                   READ_EPROM_BLOCK 0x16
+<- 02 00 FE 06 18 10 16 04 00 01 01 ... FF  29 BC 03               p33 = 4, unchanged
+-> 02 FE 01 05 08 1F 0C A1 3E 03                                   CODE_SERVICE_STOP
+<- 02 01 FE 06 08 1F 0C A1 61 03                                   ACK
+```
+
+The write frame is byte-for-byte what `CreateEpromWriteMessage` builds, the ACK is
+byte-for-byte what this document predicted, and the value did not change. So:
+
+- `WRITE_EPROM_BLOCK` is understood at the protocol level and refused at the
+  application level, silently.
+- An **identity write** (writing a block back unchanged) cannot distinguish a board
+  that applied the write from one that ignored it, so its “verified” result proves
+  only that the frame was accepted. It remains a safe first test; it is just not an
+  informative one.
+
+Two candidate explanations, in order of suspicion:
+
+1. **The full 0x14 — 0x1B sequence is required.** `SetParameterModel` never writes a
+   single block: `SetEepromData(buffer, 0x14, 8, dest)` always sends all eight in one
+   service-mode session. A partial parameter image may simply be dropped.
+2. **Service mode never actually engaged.** `CODE_SERVICE_START`'s reply carries no
+   payload, so its ACK says the frame parsed, not that the board unlocked. Sample
+   byte 62 reports the real state and had not been read *inside* the window.
+
+`Dietrich::test_service_mode()` now reads a sample between the unlock and the
+re-lock and logs byte 62, which settles (2) at no risk and without an EEPROM cycle.
+Settle it before attempting (1).
 
 ### What the component implements
 

@@ -568,7 +568,22 @@ void Dietrich::decode_sample_() {
   // indefinitely, so check once at boot and re-lock if it is. Byte 62 reports the
   // current state. Gated on allow_writes: re-locking a board that somebody else
   // deliberately unlocked is not this component's business otherwise.
-  if (!this->seen_sample_ && this->have_(62, 1)) {
+  // Reached only from inside a service mode test; see start_txn_().
+  if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_SERVICE_TEST && this->have_(62, 1)) {
+    const uint8_t sm = this->d_(62);
+    if (sm != 0) {
+      ESP_LOGI(TAG, "service mode readback: byte 62 = %u, the unlock took effect", static_cast<unsigned>(sm));
+    } else {
+      ESP_LOGE(TAG,
+               "service mode readback: byte 62 = 0, the unlock was ACKed but did NOT take effect - "
+               "EEPROM writes will be ignored");
+    }
+  }
+
+  // Samples taken inside a transaction are deliberately excluded: the boot check
+  // is about finding the boiler already unlocked, not about this component's own
+  // unlocking.
+  if (!this->seen_sample_ && !this->txn_active_ && this->have_(62, 1)) {
     this->seen_sample_ = true;
     if (this->allow_writes_ && this->d_(62) != 0) {
       ESP_LOGW(TAG, "boiler is in service mode at boot (sample byte 62 = %u), re-locking",
@@ -777,6 +792,11 @@ void Dietrich::start_txn_() {
       break;
     case DIETRICH_TXN_SERVICE_TEST:
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
+      // A sample taken while unlocked is the only way to find out whether the
+      // unlock did anything: CODE_SERVICE_START's ACK is a bare echo with no
+      // payload, so it proves the frame was understood, not that service mode
+      // is on. Sample byte 62 reports the actual state.
+      this->queue_[n++] = DIETRICH_REQ_SAMPLE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
     default:
@@ -1069,7 +1089,12 @@ void Dietrich::loop() {
 
 void Dietrich::update() {
   if (this->state_machine_ != DIETRICH_IDLE) {
-    ESP_LOGW(TAG, "previous poll still running, skipping this interval");
+    // A write holding the bus is expected, not a fault - it just borrows one
+    // poll interval. Only a poll overrunning its own interval is worth a warning.
+    if (this->txn_active_)
+      ESP_LOGD(TAG, "write transaction in progress, skipping this poll interval");
+    else
+      ESP_LOGW(TAG, "previous poll still running, skipping this interval");
     return;
   }
 

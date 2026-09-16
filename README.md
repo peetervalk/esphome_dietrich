@@ -85,7 +85,7 @@ to uncomment, in the order they are worth trying:
 
 | Method | What it does |
 |---|---|
-| `test_service_mode()` | unlock service mode and re-lock it, writing nothing |
+| `test_service_mode()` | unlock, read back sample byte 62 to confirm it engaged, re-lock |
 | `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
 | `write_param(p, v)` | read-modify-write one parameter |
 
@@ -99,6 +99,13 @@ bad write there is a combustion-safety problem rather than a comfort one.
 
 The refusal paths are covered by tests that run on a PC against a simulated
 board — see [tests/](tests/).
+
+**Status:** the transaction, the frames and the checks are confirmed against a
+live PCU-05 P3, but that board has been seen ACKing a single-block write and
+leaving the value alone. An ACK is not proof a value changed, which is why every
+write is read back and compared; see
+[mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md) for what is known
+and what is still being pinned down.
 | `calenta_v1_p5` | Avanta (`protocol.nr` 2) | XOR checksum, 6-byte header | Calenta, MCX Plus, Avanta V1_P5 |
 
 `pcu05_p3` sends the same requests as `mcr3` - the PCU-05 sample block is a

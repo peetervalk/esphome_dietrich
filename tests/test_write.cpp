@@ -53,6 +53,11 @@ struct FakeBoiler {
   bool answer_service{true};
   // enforce what Recom's sequence implies: no EEPROM write while locked
   bool require_service_for_write{true};
+  // CODE_SERVICE_START is ACKed but does not actually unlock
+  bool service_mode_engages{true};
+  // WRITE_EPROM_BLOCK is ACKed but the bytes are not stored - what a PCU-05 P3
+  // was observed doing for a single-block write on 2026-09-16
+  bool writes_take_effect{true};
 
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
   std::vector<std::vector<uint8_t>> written_frames;
@@ -71,6 +76,8 @@ struct FakeBoiler {
     service_mode = false;
     answer_reads = answer_writes = answer_service = true;
     require_service_for_write = true;
+    service_mode_engages = true;
+    writes_take_effect = true;
     reads = writes = service_on = service_off = rejected_writes = 0;
     written_frames.clear();
     tx.clear();
@@ -134,7 +141,7 @@ struct FakeBoiler {
       }
       writes++;
       written_frames.emplace_back(f, f + n);
-      if (ext >= 0x14 && ext <= 0x1F && n == 26)
+      if (writes_take_effect && ext >= 0x14 && ext <= 0x1F && n == 26)
         memcpy(eeprom[ext - 0x14], f + 7, 16);
       if (!answer_writes)
         return;
@@ -143,7 +150,8 @@ struct FakeBoiler {
     }
     if (cmd == 0x08) {  // CODE_SERVICE_START
       service_on++;
-      service_mode = true;
+      if (service_mode_engages)
+        service_mode = true;
       if (answer_service)
         respond(src, dst, cmd, ext, nullptr, 0);
       return;
@@ -226,7 +234,33 @@ int main() {
     check(g_boiler.service_off == 1, "CODE_SERVICE_STOP sent once");
     check(!g_boiler.service_mode, "boiler left locked");
     check(g_boiler.writes == 0, "nothing written to EEPROM");
+    check(logged("the unlock took effect"), "service mode confirmed on from sample byte 62");
     check(logged("service mode test finished, nothing was written"), "reported as a clean no-write run");
+    delete d;
+  }
+
+  // -- 1b. the unlock is ACKed but does nothing ------------------------------
+  {
+    begin("service mode is ACKed but does not engage");
+    auto *d = make();
+    g_boiler.service_mode_engages = false;
+    check(d->test_service_mode(), "request accepted");
+    pump(*d);
+    check(logged("did NOT take effect"), "detected from sample byte 62, not from the ACK");
+    delete d;
+  }
+
+  // -- 1c. a write is ACKed but ignored, as a PCU-05 P3 was seen doing --------
+  {
+    begin("write is ACKed but the boiler ignores it");
+    auto *d = make();
+    g_boiler.writes_take_effect = false;
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(g_boiler.writes == 1, "a write frame was sent");
+    check(g_boiler.eeprom[2][0] == 4, "EEPROM unchanged, as the boiler chose");
+    check(logged("was ACKed but reads back different"), "caught by the verify read, not trusted from the ACK");
+    check(!g_boiler.service_mode, "boiler left locked");
     delete d;
   }
 
