@@ -13,23 +13,31 @@ static const char *const TAG = "dietrich";
 // Remeha protocol (protocol.nr 1 in Recom's DeviceConfiguration.xml), used by
 // both the MCR3 and the PCU-05:
 //
-//   02 | DEST | SRC | 05 | LEN | COMMAND | EXTCMD | data.. | CRC-lo CRC-hi | 03
+//   02 | SRC | DEST | TYPE | LEN | COMMAND | EXTCMD | data.. | CRC-lo CRC-hi | 03
 //
-// Byte 3 is a constant 0x05 and byte 4 is (frame length - 2), so a 10 byte
-// request carries 0x08 there. Responses repeat that 7 byte header, so the data
-// block starts at index 7. COMMAND 0x02 is SAMPLES (EXTCMD 0x01 selects the
+// Byte 1 is the sender and byte 2 the recipient (PC 0xFE, PCU 0x01, PSU 0x00);
+// the two come back swapped in the response. Byte 3 is the message type: 0x05 in
+// a request, 0x06 in a response - Recom's IsAcknowledged() is exactly that byte
+// == 6, so an ACK is nothing more than an ordinary response frame. Byte 4 is
+// (frame length - 2), so a 10 byte request carries 0x08 there. Both directions
+// use the same 7 byte header, so the data block starts at index 7 and runs for
+// (frame length - 10) bytes. COMMAND 0x02 is SAMPLES (EXTCMD 0x01 selects the
 // sample format) and COMMAND 0x10 is READ_EPROM_BLOCK, where EXTCMD is a 16 byte
 // EEPROM block index - that is what the two counter requests below really are.
 // See mapping/pcu05_p3_protocol.md for the full command set, recovered from
-// Recom's own RemehaMessageFactory and checked against these three frames.
+// Recom's own RemehaMessageFactory/RemehaReceiver and checked byte-for-byte
+// against a live PCU-05 P3 response.
 static const uint8_t CMD_SAMPLE_MCR3[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x02, 0x01, 0x69, 0xAB, 0x03};
 static const uint8_t CMD_COUNTER1_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1C, 0x98, 0xC2, 0x03};
 static const uint8_t CMD_COUNTER2_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1D, 0x59, 0x02, 0x03};
 
 // Parameter block reads: COMMAND 0x10 (READ_EPROM_BLOCK) with the EEPROM block
 // index in the EXTCMD byte. Blocks 0x14..0x1B are the 128 byte parameter block,
-// 16 bytes per reply. SRC is 0x00 to match the counter reads, which are the same
-// command against blocks 0x1C/0x1D and are known to work on this bus.
+// 16 bytes per reply. Byte 2 is 0x00 to match the counter reads, which are the
+// same command against blocks 0x1C/0x1D and are known to work on this bus. Note
+// 0x00 is nominally the PSU's address and 0x01 the PCU's: the board answers on
+// either, echoing back whichever it was sent. Writes should still use 0x01, which
+// is what Recom does.
 static const uint8_t CMD_PARAM_REMEHA[8][10] = {
     {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x14, 0x99, 0x04, 0x03},  // bytes   0..15
     {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x15, 0x58, 0xC4, 0x03},  // bytes  16..31
@@ -45,6 +53,11 @@ static const uint8_t CMD_PARAM_REMEHA[8][10] = {
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
 static const uint8_t CMD_COUNTER1_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x01, 0x40, 0x03};
 static const uint8_t CMD_COUNTER2_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x02, 0x43, 0x03};
+
+// byte 3 of a Remeha frame: 0x05 in a request, 0x06 in a response
+static const uint8_t REMEHA_TYPE_RESPONSE = 0x06;
+// STX + 6 header bytes + CRC16 + ETX
+static const size_t REMEHA_MIN_FRAME = 10;
 
 // give up on a response after this long
 static const uint32_t RESPONSE_TIMEOUT_MS = 600;
@@ -240,12 +253,49 @@ bool Dietrich::is_valid_crc_(const uint8_t *response, size_t n) {
   return expected_crc == calculated_crc;
 }
 
-// Remeha frames carry a CRC16; Avanta (calenta_v1_p5) frames use an XOR
-// checksum instead, so for that variant we validate the response header
-bool Dietrich::frame_valid_() const {
-  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5)
-    return this->rx_len_ >= 3 && this->rx_buf_[0] == 2 && this->rx_buf_[1] == 65 && this->rx_buf_[2] == 6;
-  return is_valid_crc_(this->rx_buf_, this->rx_len_);
+// The checks Recom's RemehaReceiver.ValidateResponse makes, plus the CRC (see
+// mapping/pcu05_p3_protocol.md). Returns nullptr for a good frame, otherwise a
+// short reason for the log.
+//
+// Requiring COMMAND and EXT_COMMAND to come back echoed is what stops a late or
+// duplicated frame being credited to the wrong request. The eight parameter-block
+// reads differ only in their EXT byte, so a passing CRC says nothing about which
+// block the 16 bytes actually belong to - and once those bytes are being
+// read-modify-written back to EEPROM, crediting them to the wrong block would
+// rewrite sixteen unrelated parameters.
+//
+// Avanta (calenta_v1_p5) frames use an XOR checksum and a different header, so
+// that variant keeps its own much weaker check.
+const char *Dietrich::response_error_() const {
+  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5) {
+    if (this->rx_len_ < 3 || this->rx_buf_[0] != 2 || this->rx_buf_[1] != 65 || this->rx_buf_[2] != 6)
+      return "bad header";
+    return nullptr;
+  }
+
+  const uint8_t *req = nullptr;
+  size_t req_len = 0;
+  this->command_for_(this->queue_[this->queue_pos_], &req, &req_len);
+
+  if (this->rx_len_ < REMEHA_MIN_FRAME)
+    return "frame too short";
+  if (this->rx_buf_[0] != 0x02)
+    return "bad start byte";
+  if (this->rx_buf_[this->rx_len_ - 1] != 0x03)
+    return "bad end byte";
+  if (this->rx_buf_[3] != REMEHA_TYPE_RESPONSE)
+    return "not a response frame";
+  if (static_cast<size_t>(this->rx_buf_[4]) != this->rx_len_ - 2)
+    return "length byte disagrees with frame";
+  if (this->rx_buf_[1] != req[2] || this->rx_buf_[2] != req[1])
+    return "addresses not swapped";
+  if (this->rx_buf_[5] != req[5])
+    return "command not echoed";
+  if (this->rx_buf_[6] != req[6])
+    return "ext command not echoed";
+  if (!is_valid_crc_(this->rx_buf_, this->rx_len_))
+    return "bad CRC";
+  return nullptr;
 }
 
 size_t Dietrich::header_len_() const { return this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5 ? 6 : 7; }
@@ -542,8 +592,9 @@ void Dietrich::handle_response_() {
     return;
   }
 
-  if (!this->frame_valid_()) {
-    ESP_LOGW(TAG, "%s response failed validation", what);
+  const char *err = this->response_error_();
+  if (err != nullptr) {
+    ESP_LOGW(TAG, "%s response rejected: %s", what, err);
     return;
   }
 
@@ -552,8 +603,15 @@ void Dietrich::handle_response_() {
 
   if (req >= DIETRICH_REQ_PARAM0) {
     const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
-    const size_t n = this->data_len_ < DIETRICH_PARAM_BLOCK_SIZE ? this->data_len_ : DIETRICH_PARAM_BLOCK_SIZE;
-    for (size_t i = 0; i < n; i++)
+    // A short block used to be copied as far as it went, leaving the tail of
+    // params_ holding the previous sweep's bytes. That is a cosmetic problem for a
+    // sensor and a real one for read-modify-write, so take the block only whole.
+    if (this->data_len_ != DIETRICH_PARAM_BLOCK_SIZE) {
+      ESP_LOGW(TAG, "%s returned %u data bytes, expected %u", what, static_cast<unsigned>(this->data_len_),
+               static_cast<unsigned>(DIETRICH_PARAM_BLOCK_SIZE));
+      return;
+    }
+    for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
       this->params_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
     this->param_blocks_seen_ |= static_cast<uint8_t>(1u << blk);
     // publish only once the whole sweep is in, so the values are consistent

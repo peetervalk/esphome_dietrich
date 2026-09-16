@@ -213,7 +213,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void pub_param_(sensor::Sensor *s, size_t off, float scale);   // byte x scale
   void pub_param_s8_(sensor::Sensor *s, size_t off);             // signed byte
 
-  bool frame_valid_() const;
+  // nullptr when the received frame is a valid response to the request currently
+  // in flight, otherwise a short reason for the log
+  const char *response_error_() const;
   static bool is_valid_crc_(const uint8_t *response, size_t n);
   static float signed_float_(float value);
   static float temp_or_nan_(uint16_t raw);

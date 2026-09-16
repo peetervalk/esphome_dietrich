@@ -5,25 +5,109 @@ a .NET single-file bundle → `RecomProgram.Core.dll`), namespace
 `RecomProgram.Communication.Remeha`: `RemehaMessage.InitializeMessage`,
 `RemehaMessageFactory`, `RemehaBoilerController`.
 
-Everything below is **verified**: the rules here reproduce all three request frames
-already hard-coded in `components/dietrich/dietrich.cpp` byte-for-byte, CRC included.
+Everything below is **verified** twice over: the rules here reproduce all three request
+frames already hard-coded in `components/dietrich/dietrich.cpp` byte-for-byte, CRC
+included, and the response rules were checked against a live PCU-05 P3 capture (see
+*Response validation*).
 
 ## Frame layout
 
 ```
- 0    1      2     3     4       5        6       7 …      n-3   n-2   n-1
-02 | DEST | SRC | 05 | LEN | COMMAND | EXTCMD | data … | CRClo CRChi | 03
+ 0    1     2      3      4       5        6       7 …      n-3   n-2   n-1
+02 | SRC | DEST | TYPE | LEN | COMMAND | EXTCMD | data … | CRClo CRChi | 03
 ```
 
-- `[3]` is the constant **`0x05`**, not a length.
+- `[1]` is the **sender** and `[2]` the **recipient**; they swap between a request
+  and its response. From `RemehaMessage.InitializeMessage`, a request always carries
+  `[1] = DeviceIdentifier.PC`.
+- `[3]` is the **message type**: `0x05` in a request, `0x06` in a response.
+  `RemehaMessage.IsAcknowledged()` is exactly `content[3] == 6`, so this one byte is
+  both the direction marker and the ACK flag — there is no separate ACK field, and
+  an ACK is an ordinary response frame.
 - `[4]` is **`frame_length - 2`** — 0x08 for a 10-byte request, 0x18 for a 26-byte write.
 - `[5]` is `COMMAND`, `[6]` is `EXT_COMMAND` (for EEPROM ops, the block index).
 - CRC16 poly `0xA001`, init `0xFFFF`, over bytes `1 … n-4`, appended lo-byte first.
-- Responses repeat the same 7-byte header, so response data starts at index 7.
+- Both directions use the same 7-byte header, so data starts at index 7 and runs for
+  `frame_length - 10` bytes (`RemehaMessage.GetData`).
 
-> The comment at the top of `dietrich.cpp` labels these `LEN | FUNC | BLOCK | SUB`,
-> which is shifted one position and calls `[4]` a function code. The bytes it sends
-> are correct; only the naming was off.
+> An earlier revision of this document called `[3]` "the constant `0x05`" and labelled
+> `[1]`/`[2]` DEST/SRC. Both were wrong; the layout above is what the IL actually does.
+
+## Device addresses
+
+`RecomLibrary.Data.DeviceIdentifier` is constructed as `(deviceType, address)`:
+
+| Device | Address |
+|---|---|
+| PSU | `0x00` |
+| PCU | `0x01` |
+| SCU_C | `0x02` |
+| SU | `0x03` |
+| SCU_S | `0x08` |
+| PC | `0xFE` |
+| NO_DEVICE | `0xFF` |
+
+Every request Recom builds is `[1] = 0xFE` (itself) and `[2] =` the device it is
+talking to — so for a boiler, `[2] = 0x01`.
+
+> `dietrich.cpp` sends the sample request to `0x01` but the counter and parameter
+> reads to `0x00`, which is nominally the **PSU**, not the PCU. The board answers on
+> either and **echoes back whichever address it was sent** — verified on a PCU-05 P3
+> against both — so the swap rule below holds regardless of which is used. Writes
+> should nevertheless be addressed to `0x01`, which is what Recom does.
+
+## Response validation
+
+`RemehaReceiver.ValidateResponse` runs on **every** exchange, read or write:
+
+```csharp
+if (response == null)                          throw "Response message is null.";
+if (!response.IsAcknowledged())                throw "The response message is not an ACK-message.";
+if (request.Content[1] != response.Content[2]) throw "...device-address of the receiver...";
+if (request.Content[2] != response.Content[1]) throw "...device-address of the sender...";
+if (request.Content[5] != response.Content[5]) throw "...command-value...";
+if (request.Content[6] != response.Content[6]) throw "...extended command-value...";
+```
+
+So a response is good when byte 3 is `0x06`, the two addresses are swapped against the
+request, and COMMAND/EXT_COMMAND are echoed — on top of the CRC.
+
+> Recom itself does not benefit from any of this: `Receiver.Receive` wraps the
+> `ValidateResponse` call in a catch-all that swallows the exception and returns the
+> message anyway. The checks are sound; Recom's use of them is not.
+
+### Verified against hardware
+
+A live sample response from a PCU-05 P3, logged by this component:
+
+```
+0201FE06 48 0201 470DF30B80F3FA0530160080D40D0080820FE015008000…  (74 bytes)
+```
+
+| Byte | Value | Meaning |
+|---|---|---|
+| `[0]` | `02` | STX |
+| `[1]` | `01` | sender — the PCU (request had `[2] = 01`) |
+| `[2]` | `FE` | recipient — the PC (request had `[1] = FE`) |
+| `[3]` | `06` | **response / ACK** |
+| `[4]` | `48` | 72 = 74 − 2 |
+| `[5]` | `02` | COMMAND echoed (SAMPLES) |
+| `[6]` | `01` | EXT_COMMAND echoed (SAMPLES_FORMAT) |
+
+CRC16 over `[1 … n-4]` computes to `08F8`, matching the frame. Data is 64 bytes
+(74 − 10) and decodes to plausible values throughout: flow 33.99 °C, return 30.59 °C,
+outside 15.3 °C, calorifier 56.8 °C, state 8, lockout/blocking 255.
+
+Two EEPROM-read replies from the same board, answering requests addressed to `0x00`:
+
+```
+0200FE06 18 101C 798506673F6D0C187E9E0228045104  D2A9 03   # block 0x1C, CRC 12A9
+0200FE06 18 101D 3F350105008B00000000000000667C02  0646 03  # block 0x1D, CRC 4606
+```
+
+Both are 26 bytes with exactly 16 data bytes, `[3] = 06`, COMMAND `0x10` and the block
+index echoed, addresses swapped, CRC good — so a `READ_EPROM_BLOCK` reply is a 26-byte
+frame, and the 16-byte parameter-block assumption holds on the wire.
 
 ## COMMAND (byte 5)
 
@@ -75,8 +159,8 @@ Plain `READ_EPROM_BLOCK`, no unlock needed:
 02 FE 01 05 08 10 1B E4 C0 03
 ```
 
-`SRC` is `0x01` in the sample request and `0x00` in the counter requests, so the
-boiler evidently does not care.
+Byte `[2]` is `0x01` (PCU) in the sample request and `0x00` (PSU) in the counter
+requests; both are answered, so the board does not enforce it on reads.
 
 ## Writing a parameter
 
@@ -90,7 +174,11 @@ if (EnableServiceMode(true, dest)) {
 }
 ```
 
-and `SetEepromData` writes each block as:
+No service code is sent. `CreateServiceModeMessage` is a bare 10-byte frame with no
+payload, and nothing in the write path touches `SERVICE_CODE` (`0x37`) — the 0012 PIN
+Recom asks for is an application-level gate only.
+
+`SetEepromData` writes each block as:
 
 ```csharp
 for (int i = 0; i < blockCount; i++) {
@@ -98,7 +186,8 @@ for (int i = 0; i < blockCount; i++) {
     Array.Copy(data, i * 16, m.Content, 7, 16);         // 16 payload bytes at offset 7
     factory.SetMessageCrc(m);
     var r = SendAndRecieveMessage(m, 1000);             // 1 s timeout
-    if (r == null || !r.IsAcknowledged()) throw new CommunicationException();
+    if (r != null && !r.IsAcknowledged())               // NB: r == null falls through
+        throw new CommunicationException();
 }
 ```
 
@@ -108,8 +197,30 @@ So the sequence is:
 2. `02 FE 01 05 18 11 <blk> <16 bytes> <CRClo> <CRChi> 03` — write block, wait for ACK
 3. `02 FE 01 05 08 1F 0C A1 3E 03` — service mode **off**
 
+The ACK for step 2 is an ordinary response frame carrying no data, so for a write to
+block `0x16` sent as above it should read:
+
+```
+02 01 FE 06 08 11 16 <CRClo> <CRChi> 03
+```
+
 Recom rewrites all 8 blocks; nothing stops a single-block write, but **read the block
-first and modify one byte**, since the other 15 bytes go back verbatim.
+first and modify one byte**, since the other 15 bytes go back verbatim. Read it inside
+the write transaction — a cached copy may be stale, and writing it back would silently
+revert 15 unrelated parameters.
+
+### Two bugs in Recom worth not copying
+
+- **A timed-out write is treated as success.** The null check above falls through to
+  the next block rather than throwing, and `Receiver.Receive` swallows the
+  `"Response message is null."` exception that `ValidateResponse` raises. Treat no
+  response as a failure.
+- **A failed write leaves the boiler unlocked.** `EnableServiceMode(false, dest)` sits
+  only in the success branch of `SetParameterModel`, with no `try`/`finally`, so a
+  `CommunicationException` from `SetEepromData` propagates with service mode still on.
+  An implementation should always re-lock, and should re-lock at boot as well — a
+  reset mid-transaction otherwise leaves it on indefinitely. Sample byte 62
+  (`service_mode`) reads the current state back.
 
 ### Cautions
 
@@ -118,6 +229,9 @@ first and modify one byte**, since the other 15 bytes go back verbatim.
   problem, not a comfort one. `ValidateDataModel` exists because Recom clamps every
   value to the XML `min`/`max` before sending — do the same.
 - EEPROM endurance is finite. This is not somewhere to write on a schedule.
+- What a *rejected* write looks like is still unknown — byte `[3]` set to something
+  other than `0x06`, or silence. The safe way to find out is to write a block back
+  unchanged and watch what comes home.
 - Write support does not exist in this component today; this document is the
   specification for adding it, not a description of what it does.
 
@@ -135,6 +249,15 @@ first and modify one byte**, since the other 15 bytes go back verbatim.
 `p33` is the one that governs a tank system: the manual calls it *"DHW cut-in
 temperature DHW sensor"* and gives a factory setting of **4** for every EMC-M model,
 which matches the observed 56 → 52 °C cut-in. `p88` applies to combi/flow-through DHW.
+
+**Confirmed on hardware.** A full sweep of blocks `0x14`–`0x1B` off a live PCU-05 P3
+reassembles to 128 bytes in which every documented parameter falls inside its
+documented range once the `A x 100` / `A x 0.1` expressions are applied. The tank
+settings read `p2 = 56 °C`, `p33 = 4 °C`, `p105 = 0 °C` and `p32 = 24 °C` — i.e. charge
+to 56, cut in at 52, cut out at 56, and raise the flow setpoint to 80 while charging —
+against a calorifier sensor reading 56.8 °C at the time. `p35 = 1` (*Solo (+boiler)*)
+confirms the map's boiler-type decode, and with it that `p88`, `p96` and the DHW-in
+sensor at sample byte 4 have no meaning on this installation.
 
 ## Full parameter block
 
@@ -252,4 +375,9 @@ tables from the installer:
    stored 8 bytes before the bundle signature
    `8B1202B96A612038727B930214D7A03213F5B9E6EFAE3318EE3B2DCE24B36AAE`, and lists
    `(offset, size, type, path)` per file. `RecomProgram.Core.dll` carves straight out.
-3. Read its IL with `System.Reflection.Metadata` (in-box in the .NET SDK).
+3. Read its IL with `System.Reflection.Metadata` (in-box in the .NET SDK). The
+   methods that matter are `RemehaMessage.InitializeMessage` / `IsAcknowledged` /
+   `GetData`, `RemehaMessageFactory.Create*Message` / `GenerateAnswerMessage`,
+   `RemehaReceiver.ValidateResponse`, and `RemehaBoilerController.SetParameterModel` /
+   `SetEepromData` / `EnableServiceMode`. `DeviceIdentifier` lives next door in
+   `RecomLibrary.Core.dll`.
