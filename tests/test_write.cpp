@@ -90,7 +90,20 @@ struct FakeBoiler {
   // was observed doing for a single-block write on 2026-09-16
   bool writes_take_effect{true};
 
+  // What the sample says the boiler is doing. The defaults are the quiet boiler
+  // every existing test assumes; the write-gate tests set them to a running one.
+  uint8_t status{8};       // 8: controlled stop
+  uint8_t substatus{0};    // 0: standby
+  uint8_t blocking{0xFF};  // 255: none
+  uint16_t fan{0};
+  uint8_t ionisation{0};
+  // A PCU-05 P3 answers a parameter write by going into blocking mode within
+  // fifteen seconds; -1 is a board that does not. See
+  // mapping/pcu05_p3_protocol.md, *What cleared it*.
+  int blocking_after_write{-1};
+
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
+  int resets{0};
   int idents{0};
   std::vector<uint8_t> ident_dests;  // the address each IDENTIFICATION was sent to
   // Data bytes each address answers IDENTIFICATION with: 16 is the per-device
@@ -123,6 +136,13 @@ struct FakeBoiler {
     service_mode_engages = true;
     writes_take_effect = true;
     reads = writes = service_on = service_off = rejected_writes = 0;
+    resets = 0;
+    status = 8;
+    substatus = 0;
+    blocking = 0xFF;
+    fan = 0;
+    ionisation = 0;
+    blocking_after_write = -1;
     idents = 0;
     ident_dests.clear();
     ident_len_pcu = 16;
@@ -172,7 +192,12 @@ struct FakeBoiler {
     if (cmd == 0x02) {  // SAMPLES
       uint8_t sample[64]{};
       sample[0] = 0x47; sample[1] = 0x0D;  // flow ~33.99 C
-      sample[40] = 8;                       // state
+      sample[26] = ionisation;
+      sample[40] = status;
+      sample[42] = blocking;
+      sample[43] = substatus;
+      sample[44] = static_cast<uint8_t>(fan >> 8);
+      sample[45] = static_cast<uint8_t>(fan & 0xFF);
       sample[62] = 0;                       // stays 0 on a real PCU-05 P3
       sample[63] = service_mode ? 1 : 0;    // what actually tracks service mode
       respond(src, dst, cmd, ext, sample, sizeof(sample));
@@ -237,10 +262,17 @@ struct FakeBoiler {
       }
       writes++;
       written_frames.emplace_back(f, f + n);
+      if (blocking_after_write >= 0)
+        blocking = static_cast<uint8_t>(blocking_after_write);
       if (writes_take_effect && ext >= 0x14 && ext <= 0x1F && n == 26)
         memcpy(dst == eeprom_addr ? eeprom[ext - 0x14] : stray[ext - 0x14], f + 7, 16);
       if (!answer_writes)
         return;
+      respond(src, dst, cmd, ext, nullptr, 0);
+      return;
+    }
+    if (cmd == 0x31) {  // RESET
+      resets++;
       respond(src, dst, cmd, ext, nullptr, 0);
       return;
     }
@@ -742,6 +774,112 @@ int main() {
     check(logged("the bus is busy"), "refusal explains why");
     pump(*d, 900);
     check(g_boiler.eeprom[2][0] == 6, "the write still completed undisturbed");
+    delete d;
+  }
+
+  // -- 15. the write waits for a quiet boiler --------------------------------
+  {
+    begin("a burning boiler is not written to");
+    auto *d = make();
+    g_boiler.status = 4;      // burning DHW
+    g_boiler.substatus = 32;  // normal power control
+    g_boiler.fan = 4200;
+    g_boiler.ionisation = 62;
+    check(d->write_param(33, 6), "request accepted - the boiler has not been asked yet");
+    pump(*d);
+    check(g_boiler.writes == 0, "no write frame was sent");
+    check(g_boiler.service_on == 0, "and service mode was never unlocked");
+    check(g_boiler.eeprom[2][0] == 4, "EEPROM untouched");
+    check(logged("write refused: the boiler is running"), "the pre-flight sample says why");
+    check(logged("refused: the boiler was not quiet enough"), "and the transaction reports itself refused");
+    delete d;
+  }
+
+  // -- 15b. the exact state the 2026-09-16 write went out in ------------------
+  {
+    begin("a boiler finishing a charge is not written to either");
+    auto *d = make();
+    g_boiler.status = 8;      // controlled stop - the burner is already off
+    g_boiler.substatus = 60;  // ...but the pump is still running it out
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(g_boiler.writes == 0, "no write frame was sent");
+    check(logged("part-way through a cycle"), "the sub state is what gives it away");
+    delete d;
+  }
+
+  // -- 15c. anti-cycling is quiet enough --------------------------------------
+  {
+    begin("a boiler in the anti-cycle wait is quiet enough");
+    auto *d = make();
+    g_boiler.status = 8;
+    g_boiler.substatus = 1;  // anti-cycling
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 900);
+    check(g_boiler.writes == 8, "the whole parameter block was written");
+    check(g_boiler.eeprom[2][0] == 6, "and it took effect");
+    delete d;
+  }
+
+  // -- 15d. a blocked board can still be written back ------------------------
+  {
+    begin("a board already in blocking mode can be written to");
+    auto *d = make();
+    g_boiler.status = 9;     // blocking mode
+    g_boiler.blocking = 0;   // PCU parameter fault
+    g_boiler.substatus = 0;
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 900);
+    check(g_boiler.writes == 8, "the write goes out - this is how the p33 write was undone");
+    delete d;
+  }
+
+  // -- 16. a blocking code brought on by the write is reported ---------------
+  {
+    begin("a write that verifies but leaves the boiler blocking");
+    auto *d = make();
+    g_boiler.blocking_after_write = 20;  // identification running
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 900);
+    check(g_boiler.eeprom[2][0] == 6, "the write landed");
+    check(logged("parameter write verified"), "and verified byte-for-byte");
+    check(logged("blocking code went 255 -> 20"), "the post-write sample reports the blocking anyway");
+    check(logged("mains power cycle"), "and says what clears it");
+    delete d;
+  }
+
+  // -- 16b. a write that changes nothing says so ------------------------------
+  {
+    begin("a write on a board that does not block");
+    auto *d = make();
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 900);
+    check(logged("blocking code unchanged at 255"), "the post-write sample is reported either way");
+    delete d;
+  }
+
+  // -- 17. the board reset is one frame and nothing else ---------------------
+  {
+    begin("board reset");
+    auto *d = make();
+    check(d->reset_board(), "request accepted");
+    pump(*d);
+    check(g_boiler.resets == 1, "COMMAND 0x31 sent once");
+    check(g_boiler.writes == 0, "nothing written");
+    check(g_boiler.reads == 0, "nothing read");
+    check(g_boiler.service_on == 0 && g_boiler.service_off == 0, "service mode never touched");
+    delete d;
+  }
+
+  // -- 17b. and it is gated like every other intrusive command ---------------
+  {
+    begin("board reset gates");
+    auto *d = new Dietrich();
+    d->set_variant(DIETRICH_VARIANT_PCU05_P3);
+    check(!d->reset_board(), "refused without allow_writes");
+    check(logged("allow_writes is not set"), "refusal explains why");
+    pump(*d);
+    check(g_boiler.resets == 0, "and no frame was sent");
     delete d;
   }
 

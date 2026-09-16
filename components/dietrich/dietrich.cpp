@@ -74,6 +74,16 @@ static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08,
 static const uint8_t CMD_SERVICE_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x08, 0x0C, 0x93, 0x0E, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
 
+// RESET, COMMAND 0x31 with EXT_COMMAND NONE, addressed to the PCU. Recom's
+// command table has it; nothing in the decompiled write path sends it, and this
+// board has never been asked for it, so what it does is unverified - a warm
+// restart of the control unit is what the name and the 5 second settle times in
+// PCU-05_P3.xml suggest. It exists here because a parameter write leaves a
+// PCU-05 P3 blocking until it is restarted, and a mains power cycle is currently
+// the only known cure. Sent alone, by reset_board() only, never as part of a
+// write. See mapping/pcu05_p3_protocol.md, *What cleared it*.
+static const uint8_t CMD_RESET_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x31, 0x00, 0xBC, 0x9B, 0x03};
+
 // IDENTIFICATION, COMMAND 0x01 with EXT_COMMAND 0x0B. Recom sends this when it
 // connects, before anything else. It is a plain read: no service mode, no payload,
 // nothing written.
@@ -113,6 +123,12 @@ static const uint32_t WRITE_TIMEOUT_MS = 1000;
 static const uint32_t RX_QUIET_MS = 40;
 // settle time between two requests of the same cycle
 static const uint32_t INTER_REQUEST_MS = 60;
+// Settle time after a block write, rather than the 60 ms a read gets. Eight
+// EEPROM program cycles back to back inside half a second is this component's
+// invention, not Recom's: Recom allows a full second for each write's ACK and is
+// driven by a human in a dialog box on top of that. The board has never been
+// asked to take them any faster than this.
+static const uint32_t WRITE_SETTLE_MS = 250;
 // Resends allowed for a re-lock step that goes unanswered. Only the re-lock gets
 // them: CODE_SERVICE_STOP carries no payload and re-locking an address that is
 // already locked is a no-op, so a repeat costs nothing, while walking away from
@@ -545,6 +561,10 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
       *cmd = CMD_SERVICE_OFF_REMEHA_EE;
       *len = sizeof(CMD_SERVICE_OFF_REMEHA_EE);
       break;
+    case DIETRICH_REQ_RESET:
+      *cmd = CMD_RESET_REMEHA;
+      *len = sizeof(CMD_RESET_REMEHA);
+      break;
     case DIETRICH_REQ_IDENT_PCU:
       *cmd = CMD_IDENT_REMEHA_PCU;
       *len = sizeof(CMD_IDENT_REMEHA_PCU);
@@ -640,6 +660,29 @@ void Dietrich::decode_sample_() {
   this->pub_code_(this->lockout_sensor_, this->lockout_text_sensor_, 41, LOCKING_CODES, LOCKING_CODES_LEN);
   this->pub_code_(this->blocking_sensor_, this->blocking_text_sensor_, 42, BLOCKING_CODES, BLOCKING_CODES_LEN);
   this->pub_code_(this->sub_state_sensor_, this->sub_state_text_sensor_, 43, SUBSTATUS_CODES, SUBSTATUS_CODES_LEN);
+
+  // The two samples a write transaction takes for itself, first and last in its
+  // queue; see start_txn_(). The first decides whether the write goes out at all,
+  // the second is what reports a blocking code the write brought on.
+  if (this->txn_active_ && (this->txn_kind_ == DIETRICH_TXN_PARAM || this->txn_kind_ == DIETRICH_TXN_IDENTITY) &&
+      this->have_(43, 1)) {
+    if (!this->txn_saw_preflight_) {
+      this->txn_saw_preflight_ = true;
+      this->txn_blocking_before_ = this->d_(42);
+      const char *why = "";
+      if (!this->boiler_is_quiet_(&why)) {
+        ESP_LOGW(TAG, "write refused: %s - state %u, sub state %u, fan %u rpm, ionisation %u", why,
+                 static_cast<unsigned>(this->d_(40)), static_cast<unsigned>(this->d_(43)),
+                 static_cast<unsigned>(this->have_(45, 1) ? (this->d_(44) << 8) | this->d_(45) : 0),
+                 static_cast<unsigned>(this->d_(26)));
+        this->txn_refused_busy_ = true;
+      }
+    } else {
+      this->txn_saw_preflight_ = true;
+      this->txn_blocking_after_ = this->d_(42);
+      this->txn_have_blocking_after_ = true;
+    }
+  }
 
   // PCU-05 P3 additions; have_() skips them when the frame is shorter
   this->pub_u16_(this->fan_speed_rpm_sensor_, 44);
@@ -1085,6 +1128,59 @@ bool Dietrich::read_identification() {
   return true;
 }
 
+// A parameter write rewrites all 128 bytes of the parameter block, including the
+// setpoints and control factors the board is using at that moment. Doing that to
+// a boiler in the middle of a burn is asking for trouble on general principle,
+// and on 2026-09-16 the one write that went out during a DHW charge left a
+// PCU-05 P3 in Blocking 0 that two hours and a power cycle would not clear, while
+// the one sent to a stopped boiler produced a blocking that a power cycle did
+// clear. That is one observation of each and not a controlled experiment, so this
+// is a precaution, not a proven fix - see mapping/pcu05_p3_protocol.md.
+bool Dietrich::boiler_is_quiet_(const char **why) const {
+  // Standby, a controlled stop, and the two fault modes. A board that is already
+  // blocking or locked is not going to light, and writing to one in that state is
+  // exactly how the p33 write was undone.
+  static const uint8_t QUIET_STATUS[] = {0, 8, 9, 10};
+  // Standby, the anti-cycle wait, and the reset wait. Everything else - purging,
+  // igniting, burning, stopping, pump post-run - is part-way through a cycle.
+  static const uint8_t QUIET_SUBSTATUS[] = {0, 1, 255};
+
+  if (!this->have_(45, 1)) {
+    *why = "no sample has said what the boiler is doing";
+    return false;
+  }
+
+  bool ok = false;
+  for (size_t i = 0; i < sizeof(QUIET_STATUS); i++)
+    ok = ok || this->d_(40) == QUIET_STATUS[i];
+  if (!ok) {
+    *why = "the boiler is running";
+    return false;
+  }
+
+  ok = false;
+  for (size_t i = 0; i < sizeof(QUIET_SUBSTATUS); i++)
+    ok = ok || this->d_(43) == QUIET_SUBSTATUS[i];
+  if (!ok) {
+    *why = "the boiler is part-way through a cycle";
+    return false;
+  }
+
+  if (this->d_(44) != 0 || this->d_(45) != 0) {
+    *why = "the fan is still turning";
+    return false;
+  }
+  if (this->d_(26) != 0) {
+    *why = "there is still a flame";
+    return false;
+  }
+  return true;
+}
+
+bool Dietrich::reset_board() {
+  return this->stage_txn_(DIETRICH_TXN_RESET, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "board reset (COMMAND 0x31)");
+}
+
 bool Dietrich::test_service_mode() {
   return this->stage_txn_(DIETRICH_TXN_SERVICE_TEST, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "service mode test");
 }
@@ -1146,6 +1242,11 @@ void Dietrich::start_txn_() {
   this->txn_relock_tries_ = 0;
   this->txn_wrote_ = false;
   this->txn_blocks_read_ = 0;
+  this->txn_saw_preflight_ = false;
+  this->txn_refused_busy_ = false;
+  this->txn_blocking_before_ = 0xFF;
+  this->txn_have_blocking_after_ = false;
+  this->txn_blocking_after_ = 0xFF;
   this->queue_pos_ = 0;
 
   const uint8_t first = static_cast<uint8_t>(this->txn_first_block_ - DIETRICH_PARAM_FIRST_BLOCK);
@@ -1169,6 +1270,12 @@ void Dietrich::start_txn_() {
       this->txn_relock_pos_ = n;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
+    case DIETRICH_TXN_RESET:
+      // Nothing to unlock and nothing to put back: one frame, and whatever the
+      // board makes of it. txn_relock_pos_ stays 0 so a failure has nowhere to
+      // skip to.
+      this->queue_[n++] = DIETRICH_REQ_RESET;
+      break;
     default:
       // Read every block, then write every block, then read them all back. The
       // reads belong to this transaction because the bytes they return go
@@ -1177,6 +1284,16 @@ void Dietrich::start_txn_() {
       // Both addresses are unlocked. 0x01 is where the service flag is visible in
       // the sample, and 0x00 is where the EEPROM is; unlocking only 0x01 and then
       // writing to 0x00 earns a NAK.
+      //
+      // The sample that opens the queue is the write's pre-flight check: a
+      // parameter write goes out only when the boiler is quiet, and a sample from
+      // the last poll can be 15 seconds stale, which is long enough for a burner
+      // to have started. The one that closes it is the post-mortem - a PCU-05 P3
+      // answers a parameter write by going into blocking mode within 15 seconds,
+      // and a transaction that reported "verified" and said nothing about that is
+      // how this component came to brick a boiler for three hours on 2026-09-16.
+      // See mapping/pcu05_p3_protocol.md, *What cleared it*.
+      this->queue_[n++] = DIETRICH_REQ_SAMPLE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON_EE;
       for (uint8_t i = 0; i < count; i++)
@@ -1188,6 +1305,7 @@ void Dietrich::start_txn_() {
       this->txn_relock_pos_ = n;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF_EE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      this->queue_[n++] = DIETRICH_REQ_SAMPLE;
       break;
   }
   // the re-locks have to be last, and skip_to_relock_() jumps to the first of
@@ -1213,11 +1331,18 @@ void Dietrich::finish_txn_() {
     case DIETRICH_TXN_RELOCK:
       kind = "re-lock";
       break;
+    case DIETRICH_TXN_RESET:
+      kind = "board reset";
+      break;
     default:
       break;
   }
 
-  if (this->txn_failed_) {
+  if (this->txn_refused_busy_) {
+    ESP_LOGW(TAG, "%s refused: the boiler was not quiet enough to write to. Nothing was unlocked and nothing "
+                  "was written - try again once it is in standby",
+             kind);
+  } else if (this->txn_failed_) {
     ESP_LOGE(TAG, "%s failed; service mode was re-locked, nothing was retried", kind);
   } else if (this->txn_wrote_) {
     // txn_read_ now holds the verify reads, txn_image_ what the boiler was told
@@ -1250,6 +1375,20 @@ void Dietrich::finish_txn_() {
     ESP_LOGI(TAG, "%s finished, nothing was written", kind);
   }
 
+  // The post-write sample, reported after the verdict because it is a different
+  // question: the write can verify byte-for-byte and still leave the boiler in
+  // blocking mode. A PCU-05 P3 did exactly that on 2026-09-16, twice, and stayed
+  // there until the mains were cycled - see mapping/pcu05_p3_protocol.md.
+  if (this->txn_have_blocking_after_ && this->txn_blocking_after_ != this->txn_blocking_before_) {
+    ESP_LOGE(TAG,
+             "%s: the boiler's blocking code went %u -> %u while this ran. On a PCU-05 P3 that is cleared by a "
+             "mains power cycle; reset_board() is the untried alternative",
+             kind, static_cast<unsigned>(this->txn_blocking_before_),
+             static_cast<unsigned>(this->txn_blocking_after_));
+  } else if (this->txn_have_blocking_after_) {
+    ESP_LOGI(TAG, "%s: blocking code unchanged at %u", kind, static_cast<unsigned>(this->txn_blocking_after_));
+  }
+
   // Reported separately, and after the verdict above, because it says nothing
   // about the write: a re-lock is the last thing in the queue. What it does say
   // is that an address may still be unlocked, so re-arm the boot check. That
@@ -1267,6 +1406,9 @@ void Dietrich::finish_txn_() {
   this->txn_relock_tries_ = 0;
   this->txn_wrote_ = false;
   this->txn_blocks_read_ = 0;
+  this->txn_saw_preflight_ = false;
+  this->txn_refused_busy_ = false;
+  this->txn_have_blocking_after_ = false;
   this->txn_kind_ = DIETRICH_TXN_NONE;
 }
 
@@ -1302,6 +1444,9 @@ bool Dietrich::handle_response_() {
         break;
       case DIETRICH_REQ_SERVICE_OFF_EE:
         what = "service mode off (EEPROM)";
+        break;
+      case DIETRICH_REQ_RESET:
+        what = "reset";
         break;
       case DIETRICH_REQ_IDENT_PCU:
         what = "identification 0x01";
@@ -1509,6 +1654,15 @@ void Dietrich::advance_() {
     ESP_LOGI(TAG, "eeprom dump of 0x%02X finished", static_cast<unsigned>(this->dump_addr_));
   }
 
+  // The pre-flight sample said the boiler is busy. It is the first thing in the
+  // queue, so nothing has been unlocked and there is nothing to put back: stop
+  // here rather than walking through a re-lock of something never unlocked.
+  if (this->txn_active_ && this->txn_refused_busy_) {
+    this->finish_txn_();
+    this->state_machine_ = DIETRICH_IDLE;
+    return;
+  }
+
   // A failed step in a write transaction goes straight to the re-lock instead of
   // carrying on. Recom leaves service mode on when a write fails - it re-locks
   // only in the success branch, with no try/finally - and that is not a bug
@@ -1519,6 +1673,10 @@ void Dietrich::advance_() {
     return;
   }
 
+  // An EEPROM program cycle is slower than a read, and eight of them back to back
+  // at read speed is this component's idea, not Recom's.
+  const bool just_wrote = is_write_req_(this->queue_[this->queue_pos_]);
+
   this->txn_relock_tries_ = 0;  // the resend budget is per step, not per transaction
   this->queue_pos_++;
   if (this->queue_pos_ >= this->queue_len_) {
@@ -1527,7 +1685,7 @@ void Dietrich::advance_() {
     this->state_machine_ = DIETRICH_IDLE;
     return;
   }
-  this->next_send_time_ = millis() + INTER_REQUEST_MS;
+  this->next_send_time_ = millis() + (just_wrote ? WRITE_SETTLE_MS : INTER_REQUEST_MS);
   this->state_machine_ = DIETRICH_SEND;
 }
 

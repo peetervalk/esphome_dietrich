@@ -32,6 +32,12 @@ read-modify-write - and, more to the point, the refusals:
   endurance is finite
 - `allow_writes` and `variant: pcu05_p3` both gate the whole path
 - ordinary polling never unlocks service mode or writes anything
+- a boiler that is burning, purging or finishing a charge is **not** written to,
+  and the pre-flight sample that decides this is taken inside the transaction -
+  but one already in blocking mode is, because that is how a bad value gets undone
+- a blocking code that appears while the write runs is reported even when the
+  write itself verified byte-for-byte
+- `reset_board()` sends `COMMAND 0x31` alone: no unlock, no read, no write
 
 The stubs in `stub/` are only as complete as these tests need. They are not a
 substitute for building the component with ESPHome.

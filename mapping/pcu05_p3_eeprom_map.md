@@ -1,7 +1,9 @@
 # The PCU-05 P3 EEPROM, swept end to end
 
 Both device addresses, all 128 blocks each, 2026-09-16 15:49–15:51. The raw log is
-`mapping/eeprom_dump_260916.txt`; this file is what it decodes to.
+`mapping/eeprom_dump_260916.txt`; this file is what it decodes to. A second sweep at
+18:08 the same day, `mapping/eeprom_dump_260916_2.txt`, brackets a parameter write and
+a power cycle — see *The second sweep* below for what moved between the two.
 
 The sweep is the two diagnostic buttons in `dietrich_pcu05_p3_en.yaml`
 (`dump_eeprom(0x00, 0x00, 128)` and the same for `0x01`). `READ_EPROM_BLOCK` needs
@@ -26,7 +28,7 @@ Of the 128 blocks, **62 hold data at `0x00` and 11 at `0x01`**. Everything the
 | `0x1E`–`0x1F` | exact mirror of `0x1C`–`0x1D` | verified byte-for-byte |
 | `0x20`–`0x2F` | **blocking history**, 16 records, ring | decodes cleanly |
 | `0x30`–`0x3F` | **locking history**, 16 records, ring | decodes cleanly |
-| `0x40`–`0x41` | two 14-byte records + CRC16, mains-hours stamped | CRC verified, contents not |
+| `0x40`–`0x41` | two 14-byte records + CRC16, mains-hours stamped, written alternately | CRC and ping-pong verified, bytes 6–12 not |
 | `0x42`–`0x5F` | empty | |
 | `0x60` | `A5 5A` then `FF` — a marker of some kind | raw only |
 | `0x61`–`0x64` | 64 bytes of high-entropy data, no ASCII, no repeats | raw only |
@@ -195,7 +197,9 @@ first 14 bytes in bytes 14–15, LSB first, verified on both.
 `7E A0` and `7E 9F` are the *Power supply available* counter one step apart, `3F 69`
 is *Hours run CH+DHW* four hours behind the live value, and the two records
 alternate — a ping-pong pair, each written in turn so a mains loss can never leave
-both corrupt. What `40 3A` and byte 13 are is open.
+both corrupt. The second sweep confirms the alternation and identifies **byte 13 as a
+save counter**, incremented once per record write; see *The second sweep*. What
+`40 3A` is remains open.
 
 ## What the parameter block does not have
 
@@ -221,17 +225,83 @@ Blocks `0x14`–`0x1B` in this sweep differ from the pre-write image in
 127 are identical. The write did what it was asked to and nothing else, and it has
 survived the blocking and the reboots since.
 
+## The second sweep, 2026-09-16 18:08
+
+`mapping/eeprom_dump_260916_2.txt`, taken 2 h 19 min after the first, on the far side
+of the write that restored `p33 = 4` and of the power cycle that cleared the blocking.
+Same two buttons, same 256 blocks, every one answered.
+
+**Two blocks differ. Nothing else in either 2 KB image moved.**
+
+```
+00:16  06 0001010000000200AF1E02FFFFFFFF   ->  04 0001010000000200AF1E02FFFFFFFF
+00:41  FFFF7E9F3F69403A00FFFFFFFF 1B 1CDB  ->  FFFF7EA03F69403A00FFFFFFFF 1D 53CD
+```
+
+### `00:16` — the write lands where the boiler reads
+
+Byte 0 is p33. It went `06` -> `04`, and the live `p33` sensor went 6 -> 4 at 16:38:37,
+nine seconds after the button press. Two independent views of the same byte moving
+together: a full-block write reaches the image at `0x00`, and the parameter read
+reflects it. What *A single-block write is ACKed and ignored* left open for the
+full-block case is settled.
+
+`01:16` still reads `06`. The stale copy at the other address is maintained by nothing
+— it now disagrees with the live image, which is the clearest demonstration yet that
+nothing reads it.
+
+### `00:41` — byte 13 is a save counter, and the ping-pong is real
+
+The first sweep found `0x40` and `0x41` holding near-identical records and guessed they
+alternate. Three captures of the pair now exist, and they do:
+
+| Capture | Block | Byte 13 | Mains stamp | CRC16 |
+|---|---|---|---|---|
+| 15:49 | `0x41` | `0x1B` | `0x7E9F` | `0xDB1C` ok |
+| both | `0x40` | `0x1C` | `0x7EA0` | `0x0D92` ok |
+| 18:08 | `0x41` | `0x1D` | `0x7EA0` | `0xCD53` ok |
+
+Byte 13 increments by one per record write and the slot alternates, so the newest
+record is whichever block holds the higher byte 13, not a fixed one. All three CRC16s
+verify over bytes 0–13, poly `0xA001`, init `0xFFFF`, stored LSB first — the same
+convention as offsets 30–31 of the counter block, and the same role for byte 13 as
+offset 29 has there. Exactly one record was written in the 2 h 19 min between sweeps.
+
+The stamp is confirmed as well: `7E A0` in the record is byte-for-byte the raw pair at
+offset 8 of the counter block in the same dump, which the component scales x2 into
+*Power supply available* = 64 832 h.
+
+### What did not change, and what that rules out
+
+- **`0x60`–`0x64` are not the parameter store's integrity data.** The first sweep ended
+  by proposing exactly this test: write a parameter, see whether those 80 bytes move. A
+  parameter write happened between these two sweeps. They did not move, not one byte.
+- **The PCU updates nothing alongside a parameter write.** No companion counter, no
+  version byte, no checksum, anywhere in either 2 KB image. And the boiler has run on
+  the written image since 17:46 with `No blocking`. So the `Blocking 0` was not some
+  stale consistency value rejecting the image: it cleared without anything in the
+  EEPROM being brought back into agreement.
+- **The counter blocks are frozen.** `0x1C`–`0x1F` are identical across both sweeps, and
+  every counter sensor read the same value at both — pump hours 62 222, CH hours
+  32 474, total burner starts 129 464, mains hours 64 832 — across 2 h 19 min that
+  included a burn. The counter image is flushed rarely. Do not read those sensors as a
+  live signal, and do not use them to date anything finer than "hours".
+- **Neither ring recorded the episode.** `Blocking 20` at 16:38 and its clear at 17:46
+  left `0x20`–`0x2F` untouched, and the identification's *Last blocking code* still
+  reads 1. The first sweep concluded that a `Blocking 0` does not enter the ring; a
+  `Blocking 20` does not either.
+
 ## Still unidentified
 
 | Where | Bytes | Note |
 |---|---|---|
 | `00:00`–`00:02` + shadow | 48 | 16-bit-looking fields, one duplicated copy, no ASCII |
 | `00:03`, `00:04`:0–10 | ~16 | small signed values, calibration-shaped |
-| `00:40`–`00:41` bytes 6–13 | 8 each | alongside two known hour counters |
+| `00:40`–`00:41` bytes 6–12 | 7 each | alongside two known hour counters and the save counter at byte 13 |
 | `00:60`–`00:64` | 80 | `A5 5A` marker then high-entropy data — the only region in 2 KB that does not look like plain fields |
 | `01:40`–`01:47` | 114 | two-byte pairs, `(code, value)`-shaped |
 
-None of it is needed to read or write parameters. The one thing a second sweep would
-be worth doing for is `0x60`–`0x64`: if those 64 bytes change when a parameter is
-written, they are the parameter store's integrity data and the `Blocking 0` has its
-explanation.
+None of it is needed to read or write parameters. The second sweep answered the one
+question this list was worth re-running for: `0x60`–`0x64` do **not** change when a
+parameter is written, so they are not the parameter store's integrity data and the
+`Blocking 0` still has no explanation on the EEPROM.

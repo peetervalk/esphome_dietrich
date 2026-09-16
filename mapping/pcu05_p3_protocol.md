@@ -499,6 +499,47 @@ boiler in standby rather than mid-DHW-charge. Untested, both.
 
 Blocking is not locking: a blocking code clears when its cause does.
 
+#### What cleared it
+
+The recovery is worth recording in full, because the two writes provoked *different*
+blocking codes and only one thing ended it.
+
+| Time | Event | Blocking after |
+|---|---|---|
+| 14:19 | — | `No blocking` |
+| 14:23:14 | full-block write, `p33 4 -> 6`, boiler mid-DHW-charge (substatus 60, pump post-run) | **0**, PCU parameter fault, 14 s later |
+| ~15:0x | mains power cycle | **0**, unchanged |
+| 16:38:28 | full-block write, `p33 6 -> 4`, boiler already in blocking mode, substatus 0 | **20**, Identification running, 17 s later |
+| 16:40:49 | `IDENTIFICATION` read, both addresses | **20**, unchanged |
+| 17:00, 17:01 | ESP reboots (firmware flashes) | **20**, unchanged |
+| ~17:45 | mains power cycle | **`No blocking`** at 17:46:15 |
+
+What that settles, and what it does not:
+
+- **A full-block write provokes a blocking on this board whatever the value is.** The
+  second write restored the factory value the boiler had run on for years, and blocked
+  anyway. It is the write, not the bytes.
+- **A power cycle is not reliably enough.** The first one, with `p33 = 6` in the EEPROM,
+  changed nothing at all. The second, after `p33 = 4` was back, cleared it. Two things
+  differ between them — the value, and the fact that a second write had happened — so
+  this does not isolate which mattered.
+- **`Blocking 20` is not cleared by an `IDENTIFICATION` read.** The board sat in
+  *Identification running* for 68 minutes while answering identification reads normally,
+  and rode out two resets of the client. Whatever it is waiting for, that command is not
+  it. `AUTO_DETECT` (`0x33`) and `RESET` (`0x31`) are the two untried candidates;
+  `PCU-05_P3.xml` gives both a 5 second settle time (`command.auto.detect.time`,
+  `command.df.du.time`).
+- **The image itself is accepted.** The boiler has run CH and DHW normally on it since
+  17:46, and the second EEPROM sweep shows nothing anywhere in its 2 KB was brought into
+  agreement with the write — see `pcu05_p3_eeprom_map.md`, *The second sweep*. The
+  stale-checksum theory is dead, and with it the idea that the PCU keeps parameter
+  integrity data the write failed to update.
+
+The one difference between the two writes that is still unaccounted for is the boiler's
+own state: the first went out while it was finishing a DHW charge, the second while it
+was stopped. That is the leading hypothesis, and it is the one the component now acts
+on — see *What the component implements*.
+
 ### dF/dU is not in the parameter block
 
 Worth settling, because a full-block write that rewrote the combustion
@@ -736,11 +777,32 @@ specification. It is gated behind `allow_writes` in the YAML and behind
 `variant: pcu05_p3` — the 128 byte parameter map belongs to that parameter
 set, so the same byte offset means something else on another board.
 
-A write is a five step transaction on the component's existing request queue:
+A write is a seven step transaction on the component's existing request queue:
 
 ```
-CODE_SERVICE_START x2 -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP x2
+SAMPLES -> CODE_SERVICE_START x2 -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK
+        -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP x2 -> SAMPLES
 ```
+
+The two `SAMPLES` are what *What cleared it* above cost:
+
+- **The first is a pre-flight.** The write goes out only when that sample shows a
+  boiler that is not burning and not part-way through a cycle: status in
+  {0, 8, 9, 10}, sub-status in {0, 1, 255}, fan stopped, no ionisation current.
+  Anything else and the transaction stops there, having unlocked nothing. A board
+  already in blocking or locking mode passes deliberately — that is the state you
+  need to write to it in to undo a bad value. The check is made on a sample taken
+  inside the transaction rather than on the last poll's, which can be 15 seconds
+  old, and 15 seconds is long enough for a burner to start.
+- **The last is a post-mortem.** The blocking code from the pre-flight sample is
+  compared with the one after the re-lock, and any change is logged as an error
+  even when the write verified byte-for-byte — because that is exactly what
+  happened on 2026-09-16, twice.
+
+Each `WRITE_EPROM_BLOCK` is also followed by 250 ms rather than the 60 ms between
+reads. Eight EEPROM program cycles inside half a second is this component's own
+idea of a reasonable pace; Recom allows a full second per write ACK, with a human
+in a dialog box on top of that.
 
 The block is read *inside* the transaction, because fifteen of the sixteen bytes
 go back to the boiler verbatim and a copy from the hourly parameter sweep could
@@ -764,6 +826,13 @@ Home Assistant reaches them — see the commented-out section at the bottom of
 | `test_service_mode()` | unlock and immediately re-lock, writing nothing |
 | `write_block_unchanged(blk)` | read a block and write it back byte-for-byte |
 | `write_param(p, v)` | read-modify-write one parameter, clamped to its range |
+| `reset_board()` | `COMMAND 0x31` on its own — see below |
+
+`reset_board()` sends `RESET` to the PCU, unlocking nothing and touching no EEPROM.
+It is deliberately not part of `write_param()`: this board has never been asked for
+the command, so what it does is unverified, and the only reason to want it is the
+blocking a write leaves behind — which a mains power cycle also clears. Press it on
+a boiler that is already blocked, with the log open, and record what happens.
 
 ## Hysteresis parameters
 

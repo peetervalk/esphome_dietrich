@@ -42,6 +42,9 @@ enum DietrichRequest : uint8_t {
   // one block of an EEPROM sweep; the block index lives in dump_block_, not in
   // the request, so a 128 block dump does not need a 128 entry queue
   DIETRICH_REQ_DUMP,
+  // COMMAND 0x31, the protocol's own restart. Never sent as part of a write -
+  // only by reset_board(), on its own. See start_txn_().
+  DIETRICH_REQ_RESET,
   // EEPROM block writes, one per parameter block. Contiguous like the PARAM
   // entries and immediately below them, so the block is (req - WRITE0) and the
   // range test is WRITE0 <= req < PARAM0.
@@ -75,8 +78,8 @@ static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
 static const size_t DIETRICH_READ_FRAME_LEN = 10;
 // EEPROMSize in PCU-05_P3.xml, in 16 byte blocks: 0x00..0x7F
 static const uint16_t DIETRICH_EEPROM_BLOCKS = 128;
-// A full parameter write is 2 unlocks + 8 reads + 8 writes + 8 verify reads +
-// 2 re-locks
+// A full parameter write is 1 pre-flight sample + 2 unlocks + 8 reads + 8 writes
+// + 8 verify reads + 2 re-locks + 1 post-write sample
 static const size_t DIETRICH_QUEUE_LEN = 32;
 
 enum DietrichState : uint8_t {
@@ -94,6 +97,7 @@ enum DietrichTxn : uint8_t {
   DIETRICH_TXN_IDENTITY,      // read a block and write it straight back unchanged
   DIETRICH_TXN_PARAM,         // read-modify-write one parameter byte
   DIETRICH_TXN_RELOCK,        // re-lock only; used when the boiler boots unlocked
+  DIETRICH_TXN_RESET,         // COMMAND 0x31 on its own, unlocking nothing
 };
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
@@ -265,6 +269,15 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // documented range, and the write is skipped when the boiler already holds it.
   bool write_param(uint8_t param, uint8_t value);
 
+  // COMMAND 0x31, RESET, addressed to the PCU and sent on its own: no service
+  // mode, no EEPROM, nothing read or written. This is the protocol's version of
+  // the mains power cycle that is the only thing known to clear the blocking a
+  // parameter write provokes on a PCU-05 P3 - see mapping/pcu05_p3_protocol.md,
+  // *What cleared it*. It is deliberately NOT part of write_param(): the command
+  // has never been answered by this board, so it stays something you press
+  // yourself, with the log open, on a boiler that is already blocked.
+  bool reset_board();
+
   void update() override;
   void loop() override;
   void dump_config() override;
@@ -293,8 +306,14 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
                   const char *what);
   void start_txn_();
   void finish_txn_();
-  // jump to the re-lock, which start_txn_() always leaves last in the queue
+  // jump to the re-lock, which start_txn_() leaves last but for the post-write
+  // sample
   void skip_to_relock_();
+  // True when the last sample shows a boiler that is not burning, not purging and
+  // not finishing a charge - the only state this component will rewrite the
+  // parameter block in. Reads the sample currently in data_, so it is only
+  // meaningful straight after one has been decoded.
+  bool boiler_is_quiet_(const char **why) const;
   // Runs once, at the first write of a transaction: checks that every block was
   // read back cleanly, sanity-checks the image against the documented ranges and
   // applies the staged edit. False means the transaction has already been failed
@@ -393,6 +412,15 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // resends of the re-lock step currently in hand; reset on every step
   uint8_t txn_relock_tries_{0};
   bool txn_wrote_{false};  // at least one write was ACKed, so a verify is meaningful
+  // The pre-flight sample, first in the queue of every write transaction, and the
+  // post-write one, last. Between them they answer two questions the old sequence
+  // could not: was the boiler quiet enough to be written to, and did a blocking
+  // code appear because it was written to. See start_txn_() and decode_sample_().
+  bool txn_saw_preflight_{false};
+  bool txn_refused_busy_{false};
+  uint8_t txn_blocking_before_{0xFF};
+  bool txn_have_blocking_after_{false};
+  uint8_t txn_blocking_after_{0xFF};
   DietrichTxn txn_kind_{DIETRICH_TXN_NONE};
   uint8_t txn_first_block_{DIETRICH_PARAM_FIRST_BLOCK};
   uint8_t txn_block_count_{1};
