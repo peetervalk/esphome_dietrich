@@ -113,7 +113,9 @@ several rounds; reading all eight blocks from both device addresses showed why -
 `0x00` and `0x01` hold **different** EEPROM images, only `0x00` holds the
 parameters the boiler runs on, and the write path had been aimed at `0x01`, which
 accepted and stored the bytes where nothing reads them. The EEPROM path is now
-addressed to `0x00` throughout. An ACK is still not proof a value changed, which
+addressed to `0x00` throughout, and `0x00` promptly refused the first write with a
+NAK because service mode is per address — so a transaction unlocks and re-locks
+both. An ACK is still not proof a value changed, which
 is why every write is read back and compared; see
 [mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md) for what is known
 and what is still being pinned down.

@@ -31,6 +31,9 @@ enum DietrichRequest : uint8_t {
   // the write path; see start_txn_() for the sequence these make up
   DIETRICH_REQ_SERVICE_ON,
   DIETRICH_REQ_SERVICE_OFF,
+  // the same unlock and re-lock addressed to 0x00, where the parameter EEPROM is
+  DIETRICH_REQ_SERVICE_ON_EE,
+  DIETRICH_REQ_SERVICE_OFF_EE,
   // EEPROM block writes, one per parameter block. Contiguous like the PARAM
   // entries and immediately below them, so the block is (req - WRITE0) and the
   // range test is WRITE0 <= req < PARAM0.
@@ -61,7 +64,8 @@ static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
 static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
 // STX + 6 header bytes + 16 data bytes + CRC16 + ETX
 static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
-// A full parameter write is unlock + 8 reads + 8 writes + 8 verify reads + re-lock
+// A full parameter write is 2 unlocks + 8 reads + 8 writes + 8 verify reads +
+// 2 re-locks
 static const size_t DIETRICH_QUEUE_LEN = 32;
 
 enum DietrichState : uint8_t {
@@ -343,6 +347,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   uint8_t txn_block_count_{1};
   // bit n set once block n has been read back whole inside this transaction
   uint8_t txn_blocks_read_{0};
+  // where the trailing re-lock steps start, so a failure part-way through jumps
+  // to the first of them rather than to the last
+  uint8_t txn_relock_pos_{0};
   // Every block a transaction reads lands here, never in params_. A transaction
   // that ends up refusing to write must not have moved the published parameter
   // sensors on its way there, and a read that came back wrong must not become the

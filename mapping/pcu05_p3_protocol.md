@@ -23,7 +23,11 @@ included, and the response rules were checked against a live PCU-05 P3 capture (
 - `[3]` is the **message type**: `0x05` in a request, `0x06` in a response.
   `RemehaMessage.IsAcknowledged()` is exactly `content[3] == 6`, so this one byte is
   both the direction marker and the ACK flag — there is no separate ACK field, and
-  an ACK is an ordinary response frame.
+  an ACK is an ordinary response frame. A PCU-05 P3 also answers **`0x15`** — a NAK,
+  an otherwise perfectly formed frame that means *understood and refused*. Recom
+  lumps it in with every other non-ACK, but it is worth telling apart: silence means
+  the frame did not land, a NAK means it landed on the right device and was turned
+  down.
 - `[4]` is **`frame_length - 2`** — 0x08 for a 10-byte request, 0x18 for a 26-byte write.
 - `[5]` is `COMMAND`, `[6]` is `EXT_COMMAND` (for EEPROM ops, the block index).
 - CRC16 poly `0xA001`, init `0xFFFF`, over bytes `1 … n-4`, appended lo-byte first.
@@ -76,6 +80,17 @@ if (request.Content[6] != response.Content[6]) throw "...extended command-value.
 
 So a response is good when byte 3 is `0x06`, the two addresses are swapped against the
 request, and COMMAND/EXT_COMMAND are echoed — on top of the CRC.
+
+A `0x15` NAK satisfies every one of those checks except the first, which is why this
+component reports it separately:
+
+```
+02 00 FE 15 08 1116 219F 03   # WRITE_EPROM_BLOCK 0x16 refused by 0x00
+02 00 FE 15 08 1114 A05E 03   # WRITE_EPROM_BLOCK 0x14 refused by 0x00
+```
+
+Addresses swapped, length byte right, COMMAND and block index echoed, CRC good. The
+board read the whole frame and said no.
 
 > Recom itself does not benefit from any of this: `Receiver.Receive` wraps the
 > `ValidateResponse` call in a catch-all that swallows the exception and returns the
@@ -344,9 +359,39 @@ path — read, write and verify — there, and keeps service mode at `0x01`, whi
 where byte 63 is observed to move. The block count may still matter; it is simply
 no longer the only difference left, and it was never the one doing the damage.
 
-> If a full-block write to `0x00` is refused, the next thing to try is sending
-> `CODE_SERVICE_START` to `0x00` as well, so the unlock and the write reach the
-> same device.
+It was — with a NAK, first press. See *Service mode is per address* below.
+
+### Service mode is per address
+
+Reads from `0x00` came back complete and correct on the first attempt, so that much
+was settled. The write to `0x00` was then **NAKed** — not ignored, not answered with
+silence, but explicitly refused by a well-formed `0x15` frame.
+
+The unlock was still going to `0x01`. That is where `CODE_SERVICE_START` is known to
+work, because sample byte 63 tracks it; but the sample and the EEPROM are not the
+same device, and nothing said they share a service-mode flag. They do not. The
+component now unlocks **both** addresses at the start of a write transaction and
+re-locks both at the end:
+
+```
+CODE_SERVICE_START -> 0x01      (the one visible in sample byte 63)
+CODE_SERVICE_START -> 0x00      (the one the EEPROM answers on)
+READ_EPROM_BLOCK   -> 0x00      0x14 .. 0x1B
+WRITE_EPROM_BLOCK  -> 0x00      0x14 .. 0x1B
+READ_EPROM_BLOCK   -> 0x00      0x14 .. 0x1B, to verify
+CODE_SERVICE_STOP  -> 0x00
+CODE_SERVICE_STOP  -> 0x01
+```
+
+Both re-locks are last in the queue and a failure part-way through jumps to the
+first of them, so whatever was unlocked is locked again on every path out.
+
+The `0x00` unlock frames, CRC computed the same way as the rest:
+
+```
+02 FE 00 05 08 08 0C 930E 03    # CODE_SERVICE_START -> 0x00
+02 FE 00 05 08 1F 0C 9CFE 03    # CODE_SERVICE_STOP  -> 0x00
+```
 
 #### What it broke on the way
 
@@ -364,16 +409,16 @@ That leaves the block count as the only remaining difference from Recom, so
 parameter block in one service-mode session:
 
 ```
-CODE_SERVICE_START
-READ_EPROM_BLOCK  0x14 .. 0x1B      (8 frames)
-WRITE_EPROM_BLOCK 0x14 .. 0x1B      (8 frames, 127 bytes verbatim + 1 edited)
-READ_EPROM_BLOCK  0x14 .. 0x1B      (8 frames, to verify)
-CODE_SERVICE_STOP
+CODE_SERVICE_START  -> 0x01, then 0x00
+READ_EPROM_BLOCK    0x14 .. 0x1B      (8 frames)
+WRITE_EPROM_BLOCK   0x14 .. 0x1B      (8 frames, 127 bytes verbatim + 1 edited)
+READ_EPROM_BLOCK    0x14 .. 0x1B      (8 frames, to verify)
+CODE_SERVICE_STOP   -> 0x00, then 0x01
 ```
 
-26 exchanges, around three seconds, borrowing one poll interval. `write_param()`
+28 exchanges, around three seconds, borrowing one poll interval. `write_param()`
 uses this; `write_block_unchanged()` stays deliberately single-block, as the
-frame-level diagnostic it always was — on this board it is expected to be ignored.
+frame-level diagnostic it always was.
 
 Handing back 127 bytes verbatim is a real step up in risk from one block, because
 the bytes include the gas/air settings and the controller-protection limits. Three
@@ -411,7 +456,7 @@ set, so the same byte offset means something else on another board.
 A write is a five step transaction on the component's existing request queue:
 
 ```
-CODE_SERVICE_START -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP
+CODE_SERVICE_START x2 -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP x2
 ```
 
 The block is read *inside* the transaction, because fifteen of the sixteen bytes

@@ -60,13 +60,19 @@ static const uint8_t CMD_PARAM_REMEHA[8][10] = {
 // 0x1F (CODE_SERVICE_STOP) re-locks it, both with EXTCMD 0x0C (CODE_SERVICE).
 // No service code is sent - the 0012 PIN Recom asks for is an application-level
 // gate only, and nothing in the write path touches SERVICE_CODE (0x37).
-// Addressed to the PCU at 0x01, which is what Recom does and where sample byte 63
-// is observed to move. The EEPROM frames go to 0x00 instead - that is where this
-// board's parameter image lives - so the unlock and the write do not reach the
-// same address. If a write to 0x00 is refused, unlocking at 0x00 too is the next
-// thing to try.
+// Recom addresses these to the PCU at 0x01, and that is where the unlock is
+// observable: sample byte 63 tracks it. The EEPROM, though, is at 0x00, and the two
+// do not share a service-mode flag - unlocking 0x01 alone and writing to 0x00 is
+// answered with a NAK. So a write transaction unlocks both and re-locks both.
 static const uint8_t CMD_SERVICE_ON_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x08, 0x0C, 0xAE, 0xCE, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x1F, 0x0C, 0xA1, 0x3E, 0x03};
+
+// The same pair addressed to 0x00, where the parameter EEPROM answers. Unlocking
+// only 0x01 and then writing to 0x00 got the write frame parsed in full and
+// refused with a NAK, so the two addresses keep their own service state and each
+// one has to be unlocked for its own sake.
+static const uint8_t CMD_SERVICE_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x08, 0x0C, 0x93, 0x0E, 0x03};
+static const uint8_t CMD_SERVICE_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
 
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
@@ -75,6 +81,11 @@ static const uint8_t CMD_COUNTER2_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x
 
 // byte 3 of a Remeha frame: 0x05 in a request, 0x06 in a response
 static const uint8_t REMEHA_TYPE_RESPONSE = 0x06;
+// and 0x15 when the board understood the frame and is refusing it. Recom only
+// ever asks IsAcknowledged() ([3] == 6) and treats everything else alike, but the
+// difference matters here: a NAK means the frame reached the right device, parsed,
+// and was turned down - quite unlike silence or a mangled reply.
+static const uint8_t REMEHA_TYPE_NAK = 0x15;
 // STX + 6 header bytes + CRC16 + ETX
 static const size_t REMEHA_MIN_FRAME = 10;
 
@@ -377,6 +388,8 @@ const char *Dietrich::response_error_() const {
     return "bad start byte";
   if (this->rx_buf_[this->rx_len_ - 1] != 0x03)
     return "bad end byte";
+  if (this->rx_buf_[3] == REMEHA_TYPE_NAK)
+    return "the boiler refused it (NAK)";
   if (this->rx_buf_[3] != REMEHA_TYPE_RESPONSE)
     return "not a response frame";
   if (static_cast<size_t>(this->rx_buf_[4]) != this->rx_len_ - 2)
@@ -502,6 +515,14 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
     case DIETRICH_REQ_SERVICE_OFF:
       *cmd = CMD_SERVICE_OFF_REMEHA;
       *len = sizeof(CMD_SERVICE_OFF_REMEHA);
+      break;
+    case DIETRICH_REQ_SERVICE_ON_EE:
+      *cmd = CMD_SERVICE_ON_REMEHA_EE;
+      *len = sizeof(CMD_SERVICE_ON_REMEHA_EE);
+      break;
+    case DIETRICH_REQ_SERVICE_OFF_EE:
+      *cmd = CMD_SERVICE_OFF_REMEHA_EE;
+      *len = sizeof(CMD_SERVICE_OFF_REMEHA_EE);
       break;
     case DIETRICH_REQ_COUNTER1:
       *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
@@ -943,8 +964,11 @@ void Dietrich::start_txn_() {
   const uint8_t count = this->txn_block_count_;
 
   uint8_t n = 0;
+  this->txn_relock_pos_ = 0;
   switch (this->txn_kind_) {
     case DIETRICH_TXN_RELOCK:
+      this->txn_relock_pos_ = n;
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF_EE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
     case DIETRICH_TXN_SERVICE_TEST:
@@ -954,23 +978,32 @@ void Dietrich::start_txn_() {
       // payload, so it proves the frame was understood, not that service mode is
       // on. On a PCU-05 P3 the flag is sample byte 63.
       this->queue_[n++] = DIETRICH_REQ_SAMPLE;
+      this->txn_relock_pos_ = n;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
     default:
       // Read every block, then write every block, then read them all back. The
       // reads belong to this transaction because the bytes they return go
       // straight back to the boiler.
+      //
+      // Both addresses are unlocked. 0x01 is where the service flag is visible in
+      // the sample, and 0x00 is where the EEPROM is; unlocking only 0x01 and then
+      // writing to 0x00 earns a NAK.
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_ON_EE;
       for (uint8_t i = 0; i < count; i++)
         this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
       for (uint8_t i = 0; i < count; i++)
         this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_WRITE0 + first + i);
       for (uint8_t i = 0; i < count; i++)
         this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
+      this->txn_relock_pos_ = n;
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF_EE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
   }
-  // the re-lock has to be last: a failed step jumps straight to queue_len_ - 1
+  // the re-locks have to be last, and skip_to_relock_() jumps to the first of
+  // them, so a failure part-way through still re-locks everything it unlocked
   this->queue_len_ = n;
 
   this->next_send_time_ = millis();
@@ -1214,7 +1247,8 @@ void Dietrich::poll_response_() {
 // both for a step that failed and for a write that turned out to be unnecessary.
 void Dietrich::skip_to_relock_() {
   if (this->queue_len_ > 0)
-    this->queue_pos_ = static_cast<uint8_t>(this->queue_len_ - 1);
+    this->queue_pos_ = this->txn_relock_pos_ < this->queue_len_ ? this->txn_relock_pos_
+                                                                : static_cast<uint8_t>(this->queue_len_ - 1);
   this->next_send_time_ = millis() + INTER_REQUEST_MS;
   this->state_machine_ = DIETRICH_SEND;
 }
@@ -1224,7 +1258,8 @@ void Dietrich::advance_() {
   // carrying on. Recom leaves service mode on when a write fails - it re-locks
   // only in the success branch, with no try/finally - and that is not a bug
   // worth copying. See mapping/pcu05_p3_protocol.md.
-  if (this->txn_active_ && this->txn_failed_ && this->queue_pos_ + 1 < this->queue_len_) {
+  if (this->txn_active_ && this->txn_failed_ && this->queue_pos_ + 1 < this->queue_len_ &&
+      this->queue_pos_ < this->txn_relock_pos_) {
     this->skip_to_relock_();
     return;
   }

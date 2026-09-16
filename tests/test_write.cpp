@@ -70,7 +70,11 @@ struct FakeBoiler {
   // made a write ACK and change nothing; see mapping/pcu05_p3_protocol.md.
   uint8_t stray[12][16]{};
   uint8_t eeprom_addr{0x00};
-  bool service_mode{false};
+  // Service mode is per device address, as the board turned out to work: the
+  // unlock at 0x01 is the one visible in the sample, and the EEPROM at 0x00 has
+  // its own and NAKs a write until it is given one.
+  bool service_mode{false};      // at 0x01, reported by sample byte 63
+  bool service_mode_ee{false};   // at eeprom_addr
   bool answer_reads{true};
   bool answer_writes{true};
   bool answer_service{true};
@@ -96,7 +100,7 @@ struct FakeBoiler {
         eeprom[b][i] = static_cast<uint8_t>(0xA0 + b);  // counter blocks, filler
     memset(stray, 0xFF, sizeof(stray));
     eeprom_addr = 0x00;
-    service_mode = false;
+    service_mode = service_mode_ee = false;
     answer_reads = answer_writes = answer_service = true;
     require_service_for_write = true;
     service_mode_engages = true;
@@ -161,9 +165,19 @@ struct FakeBoiler {
       return;
     }
     if (cmd == 0x11) {  // WRITE_EPROM_BLOCK
-      if (require_service_for_write && !service_mode) {
+      if (require_service_for_write && !(dst == eeprom_addr ? service_mode_ee : service_mode)) {
         rejected_writes++;
-        return;  // silence, which is one of the two plausible refusals
+        if (!answer_writes)
+          return;  // silence, the other plausible refusal
+        // a NAK: understood, addressed to the right device, and turned down
+        std::vector<uint8_t> nak{0x02, dst, src, 0x15, 0x08, cmd, ext};
+        const uint16_t c = crc16(nak.data(), 1, nak.size());
+        nak.push_back(static_cast<uint8_t>(c & 0xFF));
+        nak.push_back(static_cast<uint8_t>(c >> 8));
+        nak.push_back(0x03);
+        for (uint8_t b : nak)
+          tx.push_back(b);
+        return;
       }
       writes++;
       written_frames.emplace_back(f, f + n);
@@ -176,15 +190,22 @@ struct FakeBoiler {
     }
     if (cmd == 0x08) {  // CODE_SERVICE_START
       service_on++;
-      if (service_mode_engages)
-        service_mode = true;
+      if (service_mode_engages) {
+        if (dst == eeprom_addr)
+          service_mode_ee = true;
+        else
+          service_mode = true;
+      }
       if (answer_service)
         respond(src, dst, cmd, ext, nullptr, 0);
       return;
     }
     if (cmd == 0x1F) {  // CODE_SERVICE_STOP
       service_off++;
-      service_mode = false;
+      if (dst == eeprom_addr)
+        service_mode_ee = false;
+      else
+        service_mode = false;
       if (answer_service)
         respond(src, dst, cmd, ext, nullptr, 0);
       return;
@@ -355,6 +376,23 @@ int main() {
     delete d;
   }
 
+  // -- 3c. the EEPROM address is not unlocked, so it refuses the write -------
+  {
+    begin("write to an address that was never unlocked");
+    auto *d = make();
+    g_boiler.require_service_for_write = true;
+    check(d->write_param(33, 6), "request accepted");
+    // the unlock reaches 0x01 but is dropped on the way to the EEPROM address
+    g_boiler.service_mode_engages = true;
+    pump(*d, 40);
+    g_boiler.service_mode_ee = false;  // as if that unlock had never landed
+    pump(*d);
+    check(g_boiler.eeprom[2][0] == 4, "p33 untouched");
+    check(logged("refused it (NAK)"), "the refusal is reported as a refusal, not a bad frame");
+    check(!g_boiler.service_mode && !g_boiler.service_mode_ee, "both addresses left locked");
+    delete d;
+  }
+
   // -- 4. a value the boiler already holds costs no EEPROM cycle -------------
   {
     begin("write p33 = 4 when it already reads 4");
@@ -362,7 +400,7 @@ int main() {
     check(d->write_param(33, 4), "request accepted");
     pump(*d);
     check(g_boiler.writes == 0, "no write frame sent at all");
-    check(g_boiler.service_on == 1 && g_boiler.service_off == 1, "still unlocked and re-locked");
+    check(g_boiler.service_on == 2 && g_boiler.service_off == 2, "still unlocked and re-locked, both addresses");
     check(!g_boiler.service_mode, "boiler left locked");
     check(logged("parameter already reads 4, skipping the write"), "skip reported");
     delete d;
@@ -418,7 +456,7 @@ int main() {
     pump(*d, 800);
     check(g_boiler.writes == 0, "NO write frame sent");
     check(memcmp(before, g_boiler.eeprom[2], 16) == 0, "EEPROM untouched");
-    check(g_boiler.service_off == 1, "re-lock still sent");
+    check(g_boiler.service_off == 2, "both re-locks still sent");
     check(!g_boiler.service_mode, "boiler left locked after the failure");
     check(logged("failed; service mode was re-locked"), "failure reported");
     delete d;
@@ -431,7 +469,7 @@ int main() {
     g_boiler.answer_writes = false;
     check(d->write_param(33, 9), "request accepted");
     pump(*d, 800);
-    check(g_boiler.service_off == 1, "re-lock still sent");
+    check(g_boiler.service_off == 2, "both re-locks still sent");
     check(!g_boiler.service_mode, "boiler left locked after the failure");
     check(logged("failed; service mode was re-locked"), "treated as a failure, not a success");
     delete d;
@@ -445,7 +483,7 @@ int main() {
     check(d->write_param(33, 9), "request accepted");
     pump(*d, 800);
     check(g_boiler.writes == 0, "no write attempted");
-    check(g_boiler.service_off == 1, "re-lock attempted anyway");
+    check(g_boiler.service_off == 2, "both re-locks attempted anyway");
     delete d;
   }
 
