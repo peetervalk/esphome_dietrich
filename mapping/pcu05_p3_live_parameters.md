@@ -5,9 +5,10 @@ minute before the first full-block write - so this is the image the appliance ha
 been running on, not the one it holds now.
 
 Kept because a `Blocking 0` (*PCU parameter fault*) is one of the faults whose
-documented remedy is to reload the factory parameter set from the appliance's CN1 /
-CN2 configuration numbers, which discards every commissioned value. This file is
-what you re-enter afterwards. See *The full-block write lands, and the PCU blocks on
+documented remedy is to reload the factory parameter set from the **dF/dU codes on
+the appliance's identification plate**, which discards every commissioned value.
+This file is what you re-enter afterwards. The dF/dU codes are not in this image -
+see *dF/dU is not in the parameter block* in `pcu05_p3_protocol.md`. See *The full-block write lands, and the PCU blocks on
 it* in `pcu05_p3_protocol.md` for how the boiler got there.
 
 The byte layout, the parameter numbering and the ranges below all come from the

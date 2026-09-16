@@ -74,6 +74,16 @@ static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08,
 static const uint8_t CMD_SERVICE_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x08, 0x0C, 0x93, 0x0E, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
 
+// IDENTIFICATION, COMMAND 0x01 with EXT_COMMAND 0x0B, addressed to the PCU at
+// 0x01. Recom sends this when it connects, before anything else. It is a plain
+// read: no service mode, no payload, nothing written.
+//
+// The reply is the `identification` node of PCU-05_P3.xml, group 1 - a different
+// 64 byte layout from the sample, decoded in decode_identification_(). Groups 2-4
+// of that node describe the SU, PSU and SCU, which answer the same command at
+// their own addresses; only the PCU's own group is read here.
+static const uint8_t CMD_IDENT_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x01, 0x0B, 0xE9, 0x5C, 0x03};
+
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
 static const uint8_t CMD_COUNTER1_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x01, 0x40, 0x03};
@@ -530,6 +540,10 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
       *cmd = CMD_SERVICE_OFF_REMEHA_EE;
       *len = sizeof(CMD_SERVICE_OFF_REMEHA_EE);
       break;
+    case DIETRICH_REQ_IDENT:
+      *cmd = CMD_IDENT_REMEHA;
+      *len = sizeof(CMD_IDENT_REMEHA);
+      break;
     case DIETRICH_REQ_COUNTER1:
       *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
       *len = calenta ? sizeof(CMD_COUNTER1_CALENTA) : sizeof(CMD_COUNTER1_MCR3);
@@ -706,6 +720,53 @@ void Dietrich::decode_counter2_() {
   this->pub_counter_(this->total_burner_start_sensor_, 0, 8.0f);
   this->pub_counter_(this->failed_burner_start_sensor_, 2, 1.0f);
   this->pub_counter_(this->number_flame_loss_sensor_, 4, 1.0f);
+}
+
+// A run of bytes read as text; the map marks these `number="4" argument="16"`,
+// sixteen characters. Unset ones come back as 0x00 or 0xFF padding.
+std::string Dietrich::text_(size_t off, size_t len) const {
+  std::string out;
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t c = this->d_(off + i);
+    if (c == 0x00 || c == 0xFF)
+      break;
+    out += (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?';
+  }
+  while (!out.empty() && out.back() == ' ')
+    out.pop_back();
+  return out;
+}
+
+// The `identification` node of PCU-05_P3.xml, group 1 - the PCU's own answer, and
+// a different 64 byte layout from the sample. Groups 2-4 of that node belong to the
+// SU, PSU and SCU, which answer the same command at their own addresses.
+//
+// Logged rather than published: this is commissioning data to be read once against
+// the identification plate, not a measurement. The dF and dU codes are the ones the
+// plate carries and the ones a factory-settings restore asks for - they live here,
+// not in the parameter block, so no parameter write can disturb them. See
+// mapping/pcu05_p3_protocol.md.
+void Dietrich::decode_identification_() {
+  if (!this->have_(18, 1)) {
+    ESP_LOGW(TAG, "identification reply carries only %u data bytes, too short to decode",
+             static_cast<unsigned>(this->data_len_));
+    return;
+  }
+
+  ESP_LOGI(TAG, "identification: dF-code %u, dU-code %u (compare these with the identification plate)",
+           static_cast<unsigned>(this->d_(1)), static_cast<unsigned>(this->d_(2)));
+  // SW_VERSION and PARAM_VERSION carry Recom's display format 6, which is not
+  // recovered, so they go out raw rather than guessed at.
+  ESP_LOGI(TAG, "  software version %u, parameter version %u, parameter type %u (raw bytes)",
+           static_cast<unsigned>(this->d_(5)), static_cast<unsigned>(this->d_(6)),
+           static_cast<unsigned>(this->d_(7)));
+  ESP_LOGI(TAG, "  next service code %u, connected PSU type %u, connected PCU type %u, SCU-C %u",
+           static_cast<unsigned>(this->d_(10)), static_cast<unsigned>(this->d_(16)),
+           static_cast<unsigned>(this->d_(17)), static_cast<unsigned>(this->d_(18)));
+  if (this->have_(32, 16))
+    ESP_LOGI(TAG, "  serial number: %s", this->text_(32, 16).c_str());
+  if (this->have_(48, 16))
+    ESP_LOGI(TAG, "  boiler name: %s", this->text_(48, 16).c_str());
 }
 
 void Dietrich::pub_param_(sensor::Sensor *s, size_t off, float scale) {
@@ -902,6 +963,18 @@ bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_co
   this->pending_byte_ = byte_offset;
   this->pending_value_ = value;
   ESP_LOGI(TAG, "%s queued", what);
+  return true;
+}
+
+bool Dietrich::read_identification() {
+  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
+    ESP_LOGW(TAG, "identification is only supported on variant pcu05_p3");
+    return false;
+  }
+  // Read-only, so unlike the write API this is not gated behind allow_writes and
+  // does not need the bus to itself - it just takes the next poll interval.
+  this->pending_ident_ = true;
+  ESP_LOGI(TAG, "identification queued for the next poll interval");
   return true;
 }
 
@@ -1123,6 +1196,9 @@ bool Dietrich::handle_response_() {
       case DIETRICH_REQ_SERVICE_OFF_EE:
         what = "service mode off (EEPROM)";
         break;
+      case DIETRICH_REQ_IDENT:
+        what = "identification";
+        break;
       default:
         what = "sample";
         break;
@@ -1204,6 +1280,9 @@ bool Dietrich::handle_response_() {
       break;
     case DIETRICH_REQ_COUNTER2:
       this->decode_counter2_();
+      break;
+    case DIETRICH_REQ_IDENT:
+      this->decode_identification_();
       break;
     default:
       // service mode on/off carry no data; the validated ACK is the whole result
@@ -1355,9 +1434,16 @@ void Dietrich::update() {
   this->param_timer_++;
   this->queue_pos_ = 0;
 
-  // A parameter sweep is 8 requests, so give it a whole poll interval of its own
-  // rather than appending it to the sample or counter cycle.
-  if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->want_params_() &&
+  // Asked first, and once, the way Recom opens a connection with it. It borrows
+  // one poll interval; the counter and parameter timers above keep counting, so
+  // nothing else is skipped, only delayed by one.
+  if (this->pending_ident_) {
+    this->pending_ident_ = false;
+    this->queue_[0] = DIETRICH_REQ_IDENT;
+    this->queue_len_ = 1;
+    // A parameter sweep is 8 requests, so give it a whole poll interval of its own
+    // rather than appending it to the sample or counter cycle.
+  } else if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->want_params_() &&
       this->param_timer_ >= PARAM_REFRESH_CYCLES) {
     this->param_timer_ = 0;
     this->param_blocks_seen_ = 0;

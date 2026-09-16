@@ -34,6 +34,9 @@ enum DietrichRequest : uint8_t {
   // the same unlock and re-lock addressed to 0x00, where the parameter EEPROM is
   DIETRICH_REQ_SERVICE_ON_EE,
   DIETRICH_REQ_SERVICE_OFF_EE,
+  // read-only, and nothing to do with the write path - it is here because every
+  // request kind has to sort below DIETRICH_REQ_WRITE0
+  DIETRICH_REQ_IDENT,
   // EEPROM block writes, one per parameter block. Contiguous like the PARAM
   // entries and immediately below them, so the block is (req - WRITE0) and the
   // range test is WRITE0 <= req < PARAM0.
@@ -87,7 +90,12 @@ enum DietrichTxn : uint8_t {
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
  public:
-  void set_variant(DietrichVariant variant) { this->variant_ = variant; }
+  void set_variant(DietrichVariant variant) {
+    this->variant_ = variant;
+    // IDENTIFICATION is decoded to the PCU-05 P3 layout, so only that variant
+    // asks for it; anything else must not send a request it cannot read back.
+    this->pending_ident_ = variant == DIETRICH_VARIANT_PCU05_P3;
+  }
   void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
 
   // frame status/state
@@ -206,6 +214,16 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(param_pump_ch_max)          // p29, byte 28, x10 %
   SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
 
+  // --- identification -----------------------------------------------------
+  // Ask the PCU who it thinks it is: dF/dU codes, software and parameter
+  // version, connected PSU/PCU types, serial number and boiler name. A plain
+  // read - no service mode, nothing written - so it is not gated behind
+  // allow_writes, only behind variant pcu05_p3. The result goes to the log.
+  //
+  // Sent once on the first poll after boot, as Recom does when it connects. Call
+  // this to ask again; the request goes out on the next poll interval.
+  bool read_identification();
+
   // --- writing ------------------------------------------------------------
   // These are the whole write API, and they are meant to be called from a YAML
   // lambda. Each returns true when the request was *accepted*, not when it
@@ -242,6 +260,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void decode_counter1_();
   void decode_counter2_();
   void decode_params_();
+  void decode_identification_();
+  // a run of data bytes read as text, stopping at the first 0x00 or 0xFF pad
+  std::string text_(size_t off, size_t len) const;
   // true when at least one param_* sensor is configured; nothing is requested
   // from the boiler otherwise
   bool want_params_() const;
@@ -371,6 +392,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
 
   // the boot service-mode check runs on the first long-enough sample only
   bool seen_sample_{false};
+  // Recom issues IDENTIFICATION when it connects; this asks once at boot and
+  // whenever read_identification() sets it again. set_variant() decides whether
+  // it starts set at all - the default variant is mcr3, which never asks.
+  bool pending_ident_{false};
 };
 
 }  // namespace dietrich

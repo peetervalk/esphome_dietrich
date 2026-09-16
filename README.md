@@ -52,6 +52,38 @@ protocols. This component implements two of them, across three variants:
 | `mcr3` (default) | Remeha (`protocol.nr` 1) | CRC16, 7-byte response header | MCR3, PCU-0x |
 | `pcu05_p3` | Remeha (`protocol.nr` 1) | same frames as `mcr3` | PCU-05, parameter set P3 |
 
+### Identification (`pcu05_p3` only)
+
+On `variant: pcu05_p3` the component asks the PCU who it thinks it is on the first
+poll after boot, the way Recom opens a connection. It is a plain read — no service
+mode, nothing written — so it is not gated behind `allow_writes` and needs no
+configuration. The answer goes to the log:
+
+```
+[I][dietrich]: identification: dF-code 7, dU-code 12 (compare these with the identification plate)
+[I][dietrich]:   software version 26, parameter version 3, parameter type 1 (raw bytes)
+[I][dietrich]:   next service code 4, connected PSU type 2, connected PCU type 5, SCU-C 0
+[I][dietrich]:   serial number: 0123456789AB
+[I][dietrich]:   boiler name: PCU-05 TEST
+```
+
+The dF and dU codes are the ones printed on the appliance's identification plate,
+and the ones a factory-settings restore asks you to enter. They live in the
+identification payload, **not** in the parameter block, so no parameter write can
+disturb them — which is worth knowing before a write and worth checking after one.
+
+To ask again, e.g. from a diagnostic button, `read_identification()` sends it on the
+next poll interval:
+
+```yaml
+button:
+  - platform: template
+    name: "Boiler identification"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(boiler).read_identification();'
+```
+
 ### Writing parameters (`pcu05_p3` only)
 
 The component can also write the boiler's stored parameters back to EEPROM. It

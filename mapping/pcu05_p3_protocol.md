@@ -492,6 +492,76 @@ boiler in standby rather than mid-DHW-charge. Untested, both.
 
 Blocking is not locking: a blocking code clears when its cause does.
 
+### dF/dU is not in the parameter block
+
+Worth settling, because a full-block write that rewrote the combustion
+identification data would be a different order of problem from one that rewrote
+comfort settings. It does not. `PCU-05_P3.xml` keeps them in three separate
+`configurations` nodes:
+
+| Node | Fields | Bytes | Carried by |
+|---|---|---|---|
+| `parameter` | 98 | 0..123 | `READ_EPROM_BLOCK` / `WRITE_EPROM_BLOCK`, blocks `0x14`..`0x1B` |
+| `identification` | 49 | 0..48 | `IDENTIFICATION` (`0x01` / EXT `0x0B`), read-only |
+| `df.du` | 2 | 0..1 | `SET_DFDU` (`0x32`) |
+
+Not one of the 98 `parameter` fields is labelled `DF` or `DU`. The codes live in the
+identification payload - `dF-code` at byte 1, `dU-code` at byte 2, then
+`SW_VERSION` at 5, `PARAM_VERSION` at 6 and `PARAM_TYPE` at 7 - and are set with a
+command of their own that has nothing to do with the EEPROM block path. So the
+eight blocks written on 2026-09-16 could not have disturbed them, which agrees with
+the board reporting `Blocking 0` (*PCU parameter fault*) rather than `Blocking 17`
+(*Ident. dF/dU table error*) or `Blocking 19` (*Ident. dF/dU needed*).
+
+dF/dU is also this family's factory-restore mechanism - the role CN1/CN2 plays on
+other boilers. From `language.xml`: *"Do you want to use this dF/dU code to restore
+the factory settings?"*, *"Are you sure that the dF/dU codes entered match the
+identification plate?"* and *"Note! You must not enter any dF/dU code that is not
+indicated on the identification plate!"*. Both codes can be read back off the board
+without writing anything, since `IDENTIFICATION` is a plain read - a way to check
+what the PCU thinks it is against what the plate says, before any restore.
+
+One thing that is *not* an EEPROM checksum: `<checksum value="7129" />`, the last
+element of `PCU-05_P3.xml`. That is Recom's integrity value for the map file.
+
+#### Reading it
+
+`IDENTIFICATION` is a bare 10 byte request, COMMAND `0x01` with EXT `0x0B`,
+addressed to the PCU at `0x01`:
+
+```
+02 FE 01 05 08 01 0B E9 5C 03   # IDENTIFICATION -> 0x01
+```
+
+The reply carries 64 data bytes in the `identification` node's group 1 layout,
+which is nothing like the sample's:
+
+| Byte | Field | |
+|---|---|---|
+| 0 | Device type | |
+| 1 | **dF-code** | the identification-plate codes |
+| 2 | **dU-code** | |
+| 5 | Software version | Recom display format 6, not recovered - read raw |
+| 6 | Parameter version | as above |
+| 7 | Parameter type | |
+| 10 | Next service code | a `service.counter` selection |
+| 16 | Connected PSU type | |
+| 17 | Connected PCU type | |
+| 18 | SCU-C | |
+| 19..23 | SU no. | |
+| 24..31 | SCU-S no. | |
+| 32..47 | Serial number | 16 characters |
+| 48..63 | Boiler name | 16 characters |
+
+Groups 2, 3 and 4 of the same node are the SU, PSU and SCU, which answer the same
+command at their own addresses with a shorter, differently shaped payload - device
+type at 0, versions at 1..3, operating hours at 4, last blocking and locking codes
+at 8 and 9. Only the PCU's own group is read here.
+
+The component sends this once on the first poll after boot, as Recom does on
+connect, and `read_identification()` asks again. It is read-only and therefore not
+gated behind `allow_writes`.
+
 ### A re-lock that goes unanswered is not a failed write
 
 The same transaction reported `parameter write failed` even though the write above

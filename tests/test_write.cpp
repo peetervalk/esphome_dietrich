@@ -91,6 +91,8 @@ struct FakeBoiler {
   bool writes_take_effect{true};
 
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
+  int idents{0};
+  std::vector<uint8_t> ident_dests;  // the address each IDENTIFICATION was sent to
   std::vector<uint8_t> read_dests;  // the address each READ_EPROM_BLOCK was sent to
   std::vector<std::vector<uint8_t>> written_frames;
   std::deque<uint8_t> tx;  // bytes heading for the ESP
@@ -111,6 +113,8 @@ struct FakeBoiler {
     service_mode_engages = true;
     writes_take_effect = true;
     reads = writes = service_on = service_off = rejected_writes = 0;
+    idents = 0;
+    ident_dests.clear();
     read_dests.clear();
     written_frames.clear();
     tx.clear();
@@ -157,6 +161,27 @@ struct FakeBoiler {
       sample[62] = 0;                       // stays 0 on a real PCU-05 P3
       sample[63] = service_mode ? 1 : 0;    // what actually tracks service mode
       respond(src, dst, cmd, ext, sample, sizeof(sample));
+      return;
+    }
+    if (cmd == 0x01) {  // IDENTIFICATION
+      idents++;
+      ident_dests.push_back(dst);
+      // group 1 of the `identification` node: 64 bytes, its own layout, with two
+      // 16 character strings at 32 and 48. The values are made up; the offsets are not.
+      uint8_t id[64]{};
+      id[0] = 0x05;   // device type
+      id[1] = 7;      // dF-code
+      id[2] = 12;     // dU-code
+      id[5] = 0x1A;   // software version
+      id[6] = 0x03;   // parameter version
+      id[7] = 0x01;   // parameter type
+      id[10] = 4;     // next service code
+      id[16] = 0x02;  // connected PSU type
+      id[17] = 0x05;  // connected PCU type
+      id[18] = 0x00;  // SCU-C
+      memcpy(id + 32, "0123456789AB    ", 16);
+      memcpy(id + 48, "PCU-05 TEST     ", 16);
+      respond(src, dst, cmd, ext, id, sizeof(id));
       return;
     }
     if (cmd == 0x10) {  // READ_EPROM_BLOCK
@@ -589,6 +614,57 @@ int main() {
     check(!logged("rejected"), "no sample response was rejected");
     check(g_boiler.writes == 0 && g_boiler.service_on == 0, "polling never unlocks or writes");
     delete d;
+  }
+
+  // -- 13. identification: read-only, and asked once on connect -------------
+  {
+    begin("identification on connect");
+    auto *d = make();
+    d->update();
+    pump(*d, 150);
+    check(g_boiler.idents == 1, "IDENTIFICATION sent on the very first poll, as Recom opens with");
+    check(g_boiler.ident_dests.size() == 1 && g_boiler.ident_dests[0] == 0x01, "addressed to the PCU at 0x01");
+    check(logged("dF-code 7, dU-code 12"), "the plate codes are decoded");
+    check(logged("software version 26, parameter version 3, parameter type 1"), "versions decoded, raw");
+    check(logged("next service code 4, connected PSU type 2, connected PCU type 5"), "connected devices decoded");
+    check(logged("serial number: 0123456789AB"), "serial read as text, padding trimmed");
+    check(logged("boiler name: PCU-05 TEST"), "boiler name read as text, padding trimmed");
+    check(g_boiler.writes == 0 && g_boiler.service_on == 0, "read-only: nothing written, never unlocked");
+
+    g_log.clear();
+    for (int i = 0; i < 3; i++) {
+      d->update();
+      pump(*d, 120);
+    }
+    check(g_boiler.idents == 1, "not asked again on later polls");
+    delete d;
+  }
+
+  // -- 13b. asking for it again ----------------------------------------------
+  {
+    begin("identification on request");
+    auto *d = make();
+    d->update();
+    pump(*d, 150);  // the one on connect
+    check(d->read_identification(), "request accepted");
+    check(logged("identification queued"), "acceptance reported");
+    d->update();
+    pump(*d, 150);
+    check(g_boiler.idents == 2, "asked a second time");
+    delete d;
+  }
+
+  // -- 13c. not on a variant whose layout this is not ------------------------
+  {
+    begin("identification is gated on the variant");
+    auto *e = new Dietrich();
+    e->set_variant(DIETRICH_VARIANT_MCR3);
+    check(!e->read_identification(), "refused on a non-pcu05_p3 variant");
+    check(logged("only supported on variant pcu05_p3"), "refusal explains why");
+    e->update();
+    pump(*e, 150);
+    check(g_boiler.idents == 0, "and never sent unasked either");
+    delete e;
   }
 
   printf("\n%s (%d failed)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
