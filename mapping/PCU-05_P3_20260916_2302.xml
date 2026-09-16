@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ss:Workbook xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:html="http://www.w3.org/TR/REC-html40" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <o:DocumentProperties>
+    <o:Version>7.3.50.0</o:Version>
+    <o:Created>16.09.2026 23:01:55</o:Created>
+    <o:LastAuthor>Recom (PCST)</o:LastAuthor>
+    <o:Author>Recom (PCST)</o:Author>
+  </o:DocumentProperties>
+  <ss:Styles>
+    <ss:Style ss:ID="Default" ss:Name="Normal">
+      <ss:Alignment Vertical="Bottom" />
+      <ss:Borders />
+      <ss:Font x:Family="Swiss" ss:Bold="0" />
+      <ss:Interior />
+      <ss:NumberFormat />
+      <ss:Protection />
+    </ss:Style>
+    <ss:Style ss:ID="s21">
+      <ss:Font x:Family="Swiss" ss:Bold="1" />
+    </ss:Style>
+    <ss:Style ss:ID="s22">
+      <ss:NumberFormat ss:Format="hh:mm:ss.000;@" />
+    </ss:Style>
+    <ss:Style ss:ID="s23">
+      <ss:NumberFormat ss:Format="Fixed" />
+    </ss:Style>
+  </ss:Styles>
+  <ss:Worksheet ss:Name="Header">
+    <ss:Table>
+      <ss:Column ss:AutoFitWidth="0" ss:Width="100" ss:Span="1" />
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">application.name</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Recom (PCST)</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">application.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">7.3.50.0</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">file.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">rxp</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">language.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">7.73</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">configuration.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">0.2</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">boiler.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">PCU-05_P3</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">parameter.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">3</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">software.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1.7</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">parameter.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">F.F</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">df</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">19</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">du</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">2</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+    </ss:Table>
+  </ss:Worksheet>
+  <ss:Worksheet ss:Name="Parameters">
+    <ss:Table>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">User level</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">T flow set point</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">61.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">2</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">DHW set point</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">55.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">3</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Boiler controls</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Heating on, DHW on</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">4</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Comfort DHW</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Always on</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">5</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Pump post run CH</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">10.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Service level</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">17</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Full load HTG</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">4,700.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">18</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Full load DHW</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">4,700.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">19</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Partload HTG/DHW</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">1,100.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">20</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Offset partload</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">80.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">21</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Start load</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">2,300.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">23</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Max Flow system</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">90.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">24</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Factor avg flow</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">35.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">25</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Footpoint T outside</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">30.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">26</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Footpoint Tflow</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">25.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">27</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Clima p outside temp</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">-6.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">28</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Pump CH min</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">3.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">29</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Pump CH max</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">10.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">30</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Temp frostprot.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">-10.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">31</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Anti Legionella</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">no</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">32</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Setpoint raise DHW</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">24.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">33</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Hystereses calorif.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">5.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">34</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Ext. 3-way valve standby</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">CH</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">35</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Boiler type:</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Solo (+boiler)</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">36</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Blocking input</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Blocking without frostprot.</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">37</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Min. gas pressure</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">no</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">38</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">HRU active</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">no</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">39</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Fluegas valve time</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">0.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">40</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Status report</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Ext. 3-way valve</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">41</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Service notification</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Off</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">42</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Service hours</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">175.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">43</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Service burning</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">30.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">44</ss:Data>
+        </ss:Cell>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">De-airation cycle</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Modulating pump</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+    </ss:Table>
+  </ss:Worksheet>
+</ss:Workbook>

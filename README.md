@@ -153,12 +153,19 @@ to uncomment, in the order they are worth trying:
 |---|---|
 | `test_service_mode()` | unlock, read a sample back to confirm it engaged, re-lock |
 | `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
-| `write_param(p, v)` | read the whole parameter block, change one byte, write it all back |
+| `write_param(p, v)` | read the whole parameter block, change one byte, refresh its CRCs, write it all back |
 
 A parameter write is a single transaction that unlocks service mode, re-reads all
 eight EEPROM blocks, writes them all back with one byte changed, reads them back
 to verify and re-locks — and that re-lock happens whether or not the write
-succeeded. It writes the whole block because Recom does. Before anything is
+succeeded. It writes the whole block because Recom does.
+
+It also **recomputes the two CRC16s the 128-byte parameter image carries over
+itself** — bytes 62–63 and 126–127 — because the PCU stores a set that fails them
+and then refuses to adopt it, staying on its old values and raising `Blocking 0`.
+That is not in Recom's protocol layer; it was found by putting a sniffer on
+Recom's own cable. See [mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md),
+*What the PCU actually checks*. Before anything is
 written back, 58 documented parameters in the freshly read image are checked
 against their ranges - each block as it arrives, and the whole image again as the
 last gate - so a corrupted read is refused rather than returned to EEPROM. A

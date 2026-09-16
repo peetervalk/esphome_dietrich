@@ -150,11 +150,26 @@ SCU-S that has stopped talking looks like from the PCU.
 - **The identification's *Last blocking code* and *Last locking code* are the newest
   ring entries**, not the live status: code 1 at `0x2B` and code 36 at `0x31`. They
   do not lag, and they are not copies of the sample bytes.
-- **The `Blocking 0` of 2026-09-16 14:23 left no record.** No slot in either ring
-  carries code 0, and the newest blocking is 382 hours — sixteen days — before this
-  sweep. So a *PCU parameter fault* does not enter the blocking history at all, and
-  the history cannot date the write. That closes the question `pcu05_p3_protocol.md`
-  raised under *The rest of the EEPROM*.
+- **The `Blocking 0` of 2026-09-16 left no record, and this is now settled.** Both
+  rings are **byte-identical across five independent snapshots** — the three ESP
+  sweeps at 15:49, 18:11 and 20:52, and the two Recom captures at 22:56 and 23:03 —
+  a window that contains the second episode at 19:15 and its recovery. Nothing was
+  written to either ring while the boiler was blocked. So a *PCU parameter fault*
+  does not enter the blocking history at all, and the history cannot date the write.
+  That closes the question `pcu05_p3_protocol.md` raised under *The rest of the
+  EEPROM*.
+- **It is the board's doing, not a display filter.** Code `0` is a defined value in
+  Recom's own `error.code` table, so Recom would render such a record if one existed.
+  It shows sixteen blockings and two lockings on this appliance and none of them is
+  a zero.
+- Worth knowing when reading `PCU-05_P3.xml`: the record layouts are named the
+  opposite way round from what they hold. `failure` carries `code.txt="E"` and is
+  the **lockout** record; `error` carries `code.txt="b"` and is the **blocking**
+  one — `E` and `b` being what the boiler's own display prefixes them with.
+- Recom showing exactly **two** lockings against sixteen in the ring means it reads a
+  fixed pair, not the ring: `0x30` and `0x31`, which — the write pointer being at
+  `0x32` — are also the two newest. Either reading predicts the same two entries,
+  *SCU-S communication* and *5x Flame loss*, so what Recom displays says which.
 - Both rings are unprotected: no checksum, and the last byte of each record is the
   *Actual power* field the map documents.
 

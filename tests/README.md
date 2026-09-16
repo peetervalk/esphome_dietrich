@@ -19,6 +19,12 @@ No ESPHome, no toolchain beyond a C++17 compiler, no hardware.
 The happy paths - unlock/re-lock, an identity write, a single-parameter
 read-modify-write - and, more to the point, the refusals:
 
+- a parameter write recomputes the image's **two CRC16s** (bytes 62-63 over
+  0-61, bytes 126-127 over 64-125), so exactly three bytes move for a
+  single-parameter change, and the simulated board - which judges the stored set
+  at the re-lock, as a PCU-05 P3 does at its next identification - has nothing to
+  raise `Blocking 0` about. Undo just the CRC afterwards and it does raise it.
+- an image that arrives already failing its own CRC is reported and repaired
 - a read that does not come back means **no write frame is sent at all**, so the
   fifteen unrelated parameters in that block are never at risk
 - every failure path still sends `CODE_SERVICE_STOP`, including a failure of the

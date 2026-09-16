@@ -89,6 +89,13 @@ static const size_t DIETRICH_PARAM_BYTES = DIETRICH_PARAM_BLOCKS * DIETRICH_PARA
 // EEPROM block indices the parameter block occupies, used as the EXT_COMMAND byte
 static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
 static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
+// The image protects itself with a CRC16 per 64 byte half: bytes 62..63 cover
+// bytes 0..61 and bytes 126..127 cover bytes 64..125, same poly and init as the
+// frame CRC, stored LSB first. The PCU checks them, and a set whose CRC does not
+// match is stored but never adopted - that is Blocking 0. Captured off Recom
+// making two parameter writes, mapping/260916_2303.pcapng.
+static const size_t DIETRICH_PARAM_HALF = 64;
+static const size_t DIETRICH_PARAM_CRC_SPAN = 62;
 // STX + 6 header bytes + 16 data bytes + CRC16 + ETX
 static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
 static const size_t DIETRICH_READ_FRAME_LEN = 10;
@@ -132,8 +139,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   }
   void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
   // When set, a parameter write unlocks with CODE_FACTORY (0x09/0x52) instead of
-  // CODE_SERVICE (0x08/0x0C). This is a level, not an addition - Recom asks for
-  // the PIN and is then in factory level - so the two are never sent together.
+  // CODE_SERVICE (0x08/0x0C) - a level, not an addition, so the two are never
+  // sent together. Recom was captured writing parameters from two different
+  // menu levels and sent CODE_SERVICE both times, so this buys nothing; it is
+  // kept only to put COMMAND 0x09 to a board and see what it says.
   void set_use_factory_mode(bool use) { this->use_factory_mode_ = use; }
 
   // frame status/state
@@ -386,6 +395,11 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // reads inside its range - i.e. the image is plausibly a real one
   bool image_is_sane_() const;
   bool block_is_sane_(size_t blk) const;
+  // Recompute both half-image CRCs in place. Needs the whole 128 byte image, so
+  // it is only ever called on a transaction that read all eight blocks.
+  static void apply_param_crcs_(uint8_t *image);
+  // true when an image as read off the boiler matches its own two CRCs
+  static bool param_crcs_ok_(const uint8_t *image);
   // Report a raw reply without rejecting it: length, what the type byte says,
   // whether the addresses came back swapped and the COMMAND/EXT echoed, and
   // whether the CRC is good. Everything response_error_() would have refused on,

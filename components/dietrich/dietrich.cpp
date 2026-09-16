@@ -196,6 +196,13 @@ static const ParamLimit PARAM_LIMITS[] = {
     {31, 30, 0, 2},     // Anti legionella
     {32, 31, 0, 25},    // Setpoint raise while charging the calorifier
     {33, 32, 2, 15},    // Hysteresis calorifier - DHW cut-in below tank setpoint
+    // The four below sit in the image's *upper* half, so a write to any of them
+    // refreshes the CRC at bytes 126..127 rather than the one at 62..63. That the
+    // upper half is protected the same way is certain - the stored CRC checks out
+    // on every dump - but no writer has been observed maintaining it: Recom's
+    // parameter screens stop at p44 on this board and its EEPROM menu is greyed
+    // out, so it cannot be made to write here at all. Writing one of these is the
+    // experiment that settles it. See mapping/pcu05_p3_protocol.md.
     {73, 72, 1, 10},    // Hysteresis CH
     {85, 84, 0, 20},    // Hysteresis warming up (DHW comfort)
     {88, 87, 1, 10},    // Hysteresis DHW - combi/flow-through only
@@ -1076,6 +1083,31 @@ bool Dietrich::block_is_sane_(size_t blk) const {
   return true;
 }
 
+// The two CRCs the image carries over itself. Recom recomputes them inside every
+// parameter write - the block holding the CRC goes back changed even when no
+// parameter in it did - and a set whose CRC does not match is stored by the PCU
+// and then not adopted, which is what Blocking 0 (*PCU parameter fault*) names.
+// Captured 2026-09-16, mapping/260916_2303.pcapng: p33 4 -> 5 moved bytes 62,63
+// from 8f 05 to 8e 55, and p2 56 -> 55 moved them on to 9a 50.
+void Dietrich::apply_param_crcs_(uint8_t *image) {
+  for (size_t half = 0; half < DIETRICH_PARAM_BYTES; half += DIETRICH_PARAM_HALF) {
+    const uint16_t crc = crc16_(image, half, half + DIETRICH_PARAM_CRC_SPAN);
+    image[half + DIETRICH_PARAM_CRC_SPAN] = static_cast<uint8_t>(crc & 0xFF);
+    image[half + DIETRICH_PARAM_CRC_SPAN + 1] = static_cast<uint8_t>(crc >> 8);
+  }
+}
+
+bool Dietrich::param_crcs_ok_(const uint8_t *image) {
+  for (size_t half = 0; half < DIETRICH_PARAM_BYTES; half += DIETRICH_PARAM_HALF) {
+    const uint16_t want = crc16_(image, half, half + DIETRICH_PARAM_CRC_SPAN);
+    const uint16_t have = static_cast<uint16_t>(image[half + DIETRICH_PARAM_CRC_SPAN]) |
+                          static_cast<uint16_t>(image[half + DIETRICH_PARAM_CRC_SPAN + 1]) << 8;
+    if (want != have)
+      return false;
+  }
+  return true;
+}
+
 bool Dietrich::begin_write_phase_() {
   const uint8_t first = static_cast<uint8_t>(this->txn_first_block_ - DIETRICH_PARAM_FIRST_BLOCK);
   uint8_t need = 0;
@@ -1102,6 +1134,18 @@ bool Dietrich::begin_write_phase_() {
   memcpy(this->txn_image_, this->txn_read_, DIETRICH_PARAM_BYTES);
 
   if (this->txn_kind_ == DIETRICH_TXN_PARAM) {
+    // Recomputing the image CRCs needs all 128 bytes, so a parameter write that
+    // does not span the whole image cannot produce a set the PCU will adopt.
+    // write_param() always stages all eight blocks; this refuses anything that
+    // somehow did not.
+    if (this->txn_block_count_ != DIETRICH_PARAM_BLOCKS) {
+      ESP_LOGE(TAG, "refusing to write: a parameter write must cover all %u blocks so the image CRCs can be recomputed",
+               static_cast<unsigned>(DIETRICH_PARAM_BLOCKS));
+      this->txn_failed_ = true;
+      this->skip_to_relock_();
+      return false;
+    }
+
     // A parameter that already holds the wanted value is not worth an EEPROM
     // cycle, and endurance is finite. The check waits until here because it needs
     // the block this transaction just read, not a stale copy from the sweep.
@@ -1110,7 +1154,27 @@ bool Dietrich::begin_write_phase_() {
       this->skip_to_relock_();
       return false;
     }
+
+    // Worth saying out loud before the edit: an image that already fails its own
+    // CRC is a boiler running one set and storing another, which is the state
+    // every earlier write of this component's left behind. The write below fixes
+    // it on the way past.
+    if (!param_crcs_ok_(this->txn_read_)) {
+      ESP_LOGW(TAG, "the stored parameter set does not match its own CRC - the Blocking 0 condition; "
+                    "this write recomputes it");
+    }
+
     this->txn_image_[this->pending_byte_] = this->pending_value_;
+    apply_param_crcs_(this->txn_image_);
+    ESP_LOGI(TAG, "image CRCs: %02X%02X -> %02X%02X (low half), %02X%02X -> %02X%02X (high half)",
+             static_cast<unsigned>(this->txn_read_[DIETRICH_PARAM_CRC_SPAN + 1]),
+             static_cast<unsigned>(this->txn_read_[DIETRICH_PARAM_CRC_SPAN]),
+             static_cast<unsigned>(this->txn_image_[DIETRICH_PARAM_CRC_SPAN + 1]),
+             static_cast<unsigned>(this->txn_image_[DIETRICH_PARAM_CRC_SPAN]),
+             static_cast<unsigned>(this->txn_read_[DIETRICH_PARAM_HALF + DIETRICH_PARAM_CRC_SPAN + 1]),
+             static_cast<unsigned>(this->txn_read_[DIETRICH_PARAM_HALF + DIETRICH_PARAM_CRC_SPAN]),
+             static_cast<unsigned>(this->txn_image_[DIETRICH_PARAM_HALF + DIETRICH_PARAM_CRC_SPAN + 1]),
+             static_cast<unsigned>(this->txn_image_[DIETRICH_PARAM_HALF + DIETRICH_PARAM_CRC_SPAN]));
   }
 
   return true;

@@ -1,0 +1,86 @@
+EEPROM of the PCU-05 P3 at device 0x00, 2026-09-16 ~23:03 local (UTC+3)
+
+NOT logged by the ESP - reconstructed from a USB capture of Recom 7.3.50 talking to
+the boiler, mapping/260916_2303.pcapng. A READ_EPROM_BLOCK reply and a
+WRITE_EPROM_BLOCK request each state what a block holds, so a capture of a service
+tool opening a connection is a dump of everything it had a use for: the parameter
+image (0x14-0x1B), the counters (0x1C-0x1F), the blocking and locking history rings
+(0x20-0x3F) and identification group 1 (0x10). Blocks Recom never read are absent -
+this is not the full 2 KB sweep that eeprom_dump_260916*.txt are.
+
+Regenerate with:
+
+    py tools/decode_capture.py mapping/260916_2303.pcapng --eeprom
+
+This is the state AFTER Recom wrote p33 4 -> 5 and p2 56 -> 55, so it supersedes
+eeprom_dump_260916_3.txt for blocks 0x14-0x1B.
+
+Cross-checked against Recom's own export of the same session,
+PCU-05_P3_20260916_2302.xml, which decodes to the same values: p1 61, p2 55, p5 10,
+p23 90, p25 30, p26 25, p33 5. That export also pins what Recom exposes on this
+appliance - p1-p5 and p17-p44 with p22 absent, nothing above p44 - and
+PCU-05_P3_20260916_2301.xml carries the identification sheet.
+
+Changes in the parameter image since eeprom_dump_260916_3.txt (20:52):
+
+  byte   1  p2 DHW set point                    56 ->  55
+  byte  32  p33 Hystereses calorif.              4 ->   5
+  byte  62  (image CRC)                        143 -> 154
+  byte  63  (image CRC)                          5 ->  80
+
+Four bytes, and two of them are the CRC - which is the whole finding: Recom rewrote
+the low half's CRC16 (bytes 62-63) along with each parameter it changed. Both halves
+check out on this image, which is why this boiler is running the set it stores.
+
+  low  half: stored 509A, computes 509A - ok
+  high half: stored 9A85, computes 9A85 - ok
+
+# device 0x00, 45 block(s)
+eeprom 00:10 0D1302FFFF17FF037C0200FFFFFFFFFF |........|.......|  t=44.4
+eeprom 00:14 3D3701000AFFFFFFFFFFFFFFFFFFFFFF |=7..............|  t=210.9
+eeprom 00:15 2F2F0B5017FF5A231E19FA030AF60018 |//.P..Z#........|  t=211.1
+eeprom 00:16 050001010000000200AF1E02FFFFFFFF |................|  t=211.3
+eeprom 00:17 FFFFFFFFFFFF323C5000C80500129A50 |......2<P......P|  t=211.5
+eeprom 00:18 FF28465A3219051E0A1E030941411464 |.(FZ2.......AA.d|  t=211.7
+eeprom 00:19 6464074605051E0205002800000FBC09 |dd.F......(.....|  t=211.9
+eeprom 00:1A 0078000A051E654B00FE0A000A64FF28 |.x....eK.....d.(|  t=212.1
+eeprom 00:1B 1A02050502020514141905FFFFFF859A |................|  t=212.3
+eeprom 00:1C 798806673F6D0C187EA10228045104D2 |y..g?m..~..(.Q..|  t=40.1
+eeprom 00:1D 3F380105008B000000000000006FA54D |?8...........o.M|  t=40.2
+eeprom 00:1E 798806673F6D0C187EA10228045104D2 |y..g?m..~..(.Q..|  t=40.3
+eeprom 00:1F 3F380105008B000000000000006FA54D |?8...........o.M|  t=40.4
+eeprom 00:20 1609747D032533243BFC5A0904AF0000 |..t}.%3$;.Z.....|  t=44.5
+eeprom 00:21 020174B30322402537FB3C42059D0007 |..t.."@%7.<B....|  t=44.8
+eeprom 00:22 161E74B6032532243BFD5A0904CA0001 |..t..%2$;.Z.....|  t=44.9
+eeprom 00:23 010179C408016441391A1D0000000000 |..y...dA9.......|  t=45.2
+eeprom 00:24 01017B1B052C643E3812250001020000 |..{..,d>8.%.....|  t=45.3
+eeprom 00:25 01027C550801644338191E0000000000 |..|U..dC8.......|  t=45.6
+eeprom 00:26 01017C61052C6443381B1C0001570000 |..|a.,dC8....W..|  t=45.7
+eeprom 00:27 01017CA2080164433915220000000000 |..|...dC9.".....|  t=46.0
+eeprom 00:28 16017D370326201C3A125A0808ED001F |..}7.& .:.Z.....|  t=46.1
+eeprom 00:29 16017D370325241D3B125A0904C00001 |..}7.%$.;.Z.....|  t=46.4
+eeprom 00:2A 01017DBF052964413814230004960000 |..}..)dA8.#.....|  t=46.5
+eeprom 00:2B 01017DE1080164433816210000000000 |..}...dC8.!.....|  t=46.8
+eeprom 00:2C 01266D56080164423814230000000000 |.&mV..dB8.#.....|  t=46.9
+eeprom 00:2D 020470C603223C223B01363B04FE0002 |..p.."<";.6;....|  t=47.2
+eeprom 00:2E 16097435032533253BFA5A0A04AE0000 |..t5.%3%;.Z.....|  t=47.3
+eeprom 00:2F 020174600322402537F63C410678000D |..t`."@%7.<A.x..|  t=47.6
+eeprom 00:30 260262CF09002C2DB9B9070000000000 |&.b...,-........|  t=40.9
+eeprom 00:31 24087442032533243BFB5A0A04E70002 |$.tB.%3$;.Z.....|  t=41.1
+eeprom 00:32 0E013ED202130C0D0FFC2C0009000000 |..>.......,.....|  t=41.3
+eeprom 00:33 24013F840420444024023C0B04B00000 |$.?.. D@$.<.....|  t=41.5
+eeprom 00:34 24014C7903242D262F0C2A0B04940000 |$.Ly.$-&/.*.....|  t=41.7
+eeprom 00:35 24014C7B042449462B0C460904A50000 |$.L{.$IF+.F.....|  t=41.9
+eeprom 00:36 24024C7C03242D26310A2C0A04AF0000 |$.L|.$-&1.,.....|  t=42.1
+eeprom 00:37 24014C7E03252B2633085A0B049E0000 |$.L~.%+&3.Z.....|  t=42.3
+eeprom 00:38 24014C7E031E2C2533082C0B04B00000 |$.L~..,%3.,.....|  t=42.5
+eeprom 00:39 23014C93031E333A38033443079D0015 |#.L...3:8.4C....|  t=42.8
+eeprom 00:3A 0E02610F02131D1D3903390008FF0000 |..a.....9.9.....|  t=42.9
+eeprom 00:3B 240262430325232139035A0A05520005 |$.bC.%#!9.Z..R..|  t=43.2
+eeprom 00:3C 0E0462A60213201E3A03390008FF0000 |..b... .:.9.....|  t=43.3
+eeprom 00:3D 0E0162AE000000000000000000000000 |..b.............|  t=43.6
+eeprom 00:3E 0E0262AE021327273105400008FE0000 |..b...''1.@.....|  t=43.7
+eeprom 00:3F 260162CF090025253806070000000000 |&.b...%%8.......|  t=44.0
+# low half CRC: stored 509A, computes 509A - ok
+# high half CRC: stored 9A85, computes 9A85 - ok
+

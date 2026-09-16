@@ -102,6 +102,27 @@ struct FakeBoiler {
   // mapping/pcu05_p3_protocol.md, *What cleared it*.
   int blocking_after_write{-1};
 
+  // The image carries a CRC16 per 64 byte half (bytes 62..63 over 0..61, bytes
+  // 126..127 over 64..125). The PCU judges the stored set against them when it
+  // next identifies itself rather than per write, so this is modelled at the
+  // re-lock: a set that does not match is kept but not adopted, and the board
+  // raises Blocking 0, *PCU parameter fault*. Only ever sets the code, never
+  // clears one, so it cannot mask blocking_after_write.
+  bool checks_param_crc{true};
+
+  bool param_crc_ok() const {
+    uint8_t image[128];
+    for (int b = 0; b < 8; b++)
+      memcpy(image + b * 16, eeprom[b], 16);
+    for (size_t half = 0; half < 128; half += 64) {
+      const uint16_t want = crc16(image, half, half + 62);
+      const uint16_t have = image[half + 62] | static_cast<uint16_t>(image[half + 63]) << 8;
+      if (want != have)
+        return false;
+    }
+    return true;
+  }
+
   // COMMAND 0x09 / EXT 0x52, the factory-level unlock. No real board has been
   // asked for it yet, so the simulator can answer either way: answer_factory
   // false is a board that parses the frame and turns it down.
@@ -341,6 +362,9 @@ struct FakeBoiler {
         service_mode_ee = false;
       else
         service_mode = false;
+      // end of a write session: the point at which the real board would notice
+      if (checks_param_crc && dst == eeprom_addr && writes > 0 && !param_crc_ok())
+        blocking = 0;
       if (drop_service_off > 0) {
         drop_service_off--;
         return;  // acted on, but the ACK never arrives
@@ -487,7 +511,11 @@ int main() {
       for (int i = 0; i < 16; i++)
         if (g_boiler.eeprom[b][i] != REAL_PARAM_IMAGE[b * 16 + i])
           changed++;
-    check(changed == 1, "exactly one byte of the whole 128 byte image changed");
+    // p33 plus the two CRC bytes of the half it sits in. Recom's own write of
+    // p33 4 -> 5 changed exactly these three; see mapping/260916_2303.pcapng.
+    check(changed == 3, "the parameter and its half's two CRC bytes changed, nothing else");
+    check(g_boiler.param_crc_ok(), "the image the boiler now holds matches its own CRCs");
+    check(g_boiler.blocking == 0xFF, "no Blocking 0 - the PCU has a set it can adopt");
     check(!g_boiler.service_mode, "boiler left locked");
     check(logged("parameter write verified: 8 block(s) from 0x14"), "verified by read-back");
     bool one_address = !g_boiler.read_dests.empty();
@@ -495,6 +523,42 @@ int main() {
       if (a != 0x00)
         one_address = false;
     check(one_address, "every read in the transaction went to the device that holds the image");
+    delete d;
+  }
+
+  // -- 3b. a stored set that already fails its CRC is repaired on the way past -
+  {
+    begin("a stale image CRC is recomputed, not preserved");
+    auto *d = make();
+    // What every parameter write this component made before the CRC was known
+    // left behind: the bytes changed, the CRC did not.
+    g_boiler.eeprom[3][14] = 0x00;
+    g_boiler.eeprom[3][15] = 0x00;
+    check(!g_boiler.param_crc_ok(), "the boiler starts out holding an inconsistent set");
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(logged("does not match its own CRC"), "the pre-existing inconsistency is reported");
+    check(g_boiler.eeprom[2][0] == 6, "p33 written");
+    check(g_boiler.param_crc_ok(), "and the image is consistent again afterwards");
+    check(g_boiler.blocking == 0xFF, "so the board has nothing to raise Blocking 0 about");
+    delete d;
+  }
+
+  // -- 3c. the CRC is what the board actually judges -------------------------
+  {
+    begin("a write that leaves the CRC stale is caught by the simulated board");
+    auto *d = make();
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    // Reach past the component and undo just the CRC, the way a write that did
+    // not recompute it would have left things. The board notices at the next
+    // re-lock, not at the write.
+    g_boiler.eeprom[3][14] = 0x8F;
+    g_boiler.eeprom[3][15] = 0x05;
+    check(!g_boiler.param_crc_ok(), "the image no longer matches its own CRC");
+    static const uint8_t RELOCK[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
+    g_boiler.on_frame(RELOCK, sizeof(RELOCK));
+    check(g_boiler.blocking == 0, "Blocking 0 - stored, and not adopted");
     delete d;
   }
 

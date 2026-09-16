@@ -1,0 +1,421 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ss:Workbook xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:html="http://www.w3.org/TR/REC-html40" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <o:DocumentProperties>
+    <o:Version>7.3.50.0</o:Version>
+    <o:Created>16.09.2026 23:01:29</o:Created>
+    <o:LastAuthor>Recom (PCST)</o:LastAuthor>
+    <o:Author>Recom (PCST)</o:Author>
+  </o:DocumentProperties>
+  <ss:Styles>
+    <ss:Style ss:ID="Default" ss:Name="Normal">
+      <ss:Alignment Vertical="Bottom" />
+      <ss:Borders />
+      <ss:Font x:Family="Swiss" ss:Bold="0" />
+      <ss:Interior />
+      <ss:NumberFormat />
+      <ss:Protection />
+    </ss:Style>
+    <ss:Style ss:ID="s21">
+      <ss:Font x:Family="Swiss" ss:Bold="1" />
+    </ss:Style>
+    <ss:Style ss:ID="s22">
+      <ss:NumberFormat ss:Format="hh:mm:ss.000;@" />
+    </ss:Style>
+    <ss:Style ss:ID="s23">
+      <ss:NumberFormat ss:Format="Fixed" />
+    </ss:Style>
+  </ss:Styles>
+  <ss:Worksheet ss:Name="Header">
+    <ss:Table>
+      <ss:Column ss:AutoFitWidth="0" ss:Width="100" ss:Span="1" />
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">application.name</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Recom (PCST)</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">application.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">7.3.50.0</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">file.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String" />
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">language.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">7.73</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">configuration.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">0.2</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">boiler.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">PCU-05_P3</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">parameter.type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">3</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">software.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1.7</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">parameter.version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">F.F</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">df</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">19</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell>
+          <ss:Data ss:Type="String">du</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">2</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+    </ss:Table>
+  </ss:Worksheet>
+  <ss:Worksheet ss:Name="Identification">
+    <ss:Table>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Boiler</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Boiler name</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">Tzerra Export   </ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">dF-code</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">19.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">dU-code</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">2.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Serial number</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1832720103840   </ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Software version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1.7</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Parameter version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">F.F</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Parameter type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">3.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Next Service code</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">A</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Connected PSU type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">4.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Connected PCU type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">5.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-C</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">1.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">11.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">255.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">PCU</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Device type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">5.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Serial number</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">FFFFÿFFFF</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Software version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">1.7</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Parameter version</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="String">F.F</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Parameter type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">3.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Operating hours</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">56,600.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Connected SU type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">1.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Connected PSU type</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">4.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Last blocking code</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">1.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">Last locking code</ss:Data>
+        </ss:Cell>
+        <ss:Cell>
+          <ss:Data ss:Type="Number">36.00</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SU no.1</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+      <ss:Row>
+        <ss:Cell ss:StyleID="s21">
+          <ss:Data ss:Type="String">SCU-S no.4</ss:Data>
+        </ss:Cell>
+      </ss:Row>
+      <ss:Row />
+    </ss:Table>
+  </ss:Worksheet>
+</ss:Workbook>

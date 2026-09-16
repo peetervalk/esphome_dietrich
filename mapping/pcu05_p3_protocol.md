@@ -10,12 +10,16 @@ frames already hard-coded in `components/dietrich/dietrich.cpp` byte-for-byte, C
 included, and the response rules were checked against a live PCU-05 P3 capture (see
 *Response validation*).
 
-> **Current state of the investigation:** jump to
-> [*Service level is not the commissioning unlock*](#service-level-is-not-the-commissioning-unlock).
-> A parameter write made at service level is ACKed, stored and verified, and then not
-> adopted by the PCU, which raises `Blocking 0` at its next identification. Several
-> earlier conclusions in this document — about the value written, the boiler's state at
-> the time, and the 0012 PIN being a UI gate — are marked where they were superseded.
+> **Settled, 2026-09-16:** the 128-byte parameter image carries **two CRC16s of its
+> own** — bytes 62–63 over bytes 0–61, bytes 126–127 over bytes 64–125 — and the PCU
+> stores a set that fails them but never adopts it, which is what `Blocking 0`
+> (*PCU parameter fault*) means. Recom recomputes them inside every write; this
+> component did not, which is the whole of the fault. Jump to
+> [*What the PCU actually checks: the parameter image CRC*](#what-the-pcu-actually-checks-the-parameter-image-crc).
+> The evidence is a sniffer capture of Recom writing two parameters,
+> `mapping/260916_2303.pcapng`, and it also disposes of the service-versus-factory-level
+> theory this document argued for a fortnight: `COMMAND 0x09` and `EXT 0x52` are never
+> sent, and the 0012 PIN never reaches the wire.
 
 ## Frame layout
 
@@ -213,13 +217,12 @@ if (EnableServiceMode(true, dest)) {
 No service code is sent. `CreateServiceModeMessage` is a bare 10-byte frame with no
 payload, and nothing in the decompiled write path touches `SERVICE_CODE` (`0x37`).
 
-> **That last step — "so the 0012 PIN is an application-level gate only" — was wrong,
-> and it cost this investigation a fortnight.** The owner has since written p1, p2 and
-> p25–p28 to *this* appliance with Recom, cleanly and with no blocking, and reaching
-> the dialog that allowed it needed the PIN — after which dF/dU were editable too.
-> Making dF/dU writable is a board-level capability, not a UI one. Whatever Recom
-> sends at that point, this decompile did not account for it. See *Service level is
-> not the commissioning unlock*.
+> **Confirmed on the wire.** A 2026-09-16 capture of Recom writing two parameters shows
+> exactly this sequence and nothing else — no PIN, no `0x37`, no factory command. What
+> the decompile does not show, because it happens inside `ValidateDataModel`'s data
+> model rather than in the message layer, is that the image being written carries **two
+> CRC16s that Recom recomputes every time**. Miss those and the write is stored and
+> ignored. See *What the PCU actually checks: the parameter image CRC*.
 
 `SetEepromData` writes each block as:
 
@@ -236,6 +239,8 @@ for (int i = 0; i < blockCount; i++) {
 
 So the sequence is:
 
+0. read all eight blocks, apply the edit, and **recompute the image's two CRC16s** —
+   bytes 62–63 and 126–127; without this the rest of the sequence is pointless
 1. `02 FE 01 05 08 08 0C AE CE 03` — service mode **on**, wait for ACK
 2. `02 FE 01 05 18 11 <blk> <16 bytes> <CRClo> <CRChi> 03` — write block, wait for ACK
 3. `02 FE 01 05 08 1F 0C A1 3E 03` — service mode **off**
@@ -531,9 +536,10 @@ blocking codes and only one thing ended it.
 What that settles, and what it does not:
 
 - ~~**A full-block write provokes a blocking on this board whatever the value is.**~~
-  **Wrong on both counts, and superseded twice over.** The two writes were made at
-  *service* level; a write made at *factory* level does not block at all. And the write
-  is not what the PCU objects to — see *Service level is not the commissioning unlock*.
+  **Wrong, and superseded twice over.** The intermediate explanation — that these writes
+  were made at *service* level and a *factory*-level write would not block — was wrong
+  too. What the PCU objects to is an image whose CRC does not match it; see
+  *What the PCU actually checks: the parameter image CRC*.
 - **A power cycle is not reliably enough.** The first one, with `p33 = 6` in the EEPROM,
   changed nothing at all. The second, after `p33 = 4` was back, cleared it. Two things
   differ between them — the value, and the fact that a second write had happened — so
@@ -566,93 +572,169 @@ both occasions, correctly. It is kept because writing 128 bytes of live control 
 into a burning boiler is a bad idea on its own merits, not because it addresses this
 fault.
 
-### Service level is not the commissioning unlock
+### What the PCU actually checks: the parameter image CRC
 
-**This is where the investigation stands as of 2026-09-16.** Everything above about
-addresses, block counts, boiler state and parameter values is either settled or
-superseded by it.
+**This is where the investigation ends.** On 2026-09-16 Recom 7.3.50 made two parameter
+writes to this appliance with a USB sniffer on the FTDI service cable. The capture is
+`mapping/260916_2303.pcapng`; `tools/decode_capture.py` turns it into annotated frames.
+It answers every open question at once, and most of what this section used to argue —
+that the difference was *service* versus *factory* level — was wrong.
+
+#### The image carries two CRC16s of its own
+
+| Image bytes | Cover | Where they live |
+|---|---|---|
+| 62–63 | bytes 0–61 | block `0x17`, offsets 14–15 |
+| 126–127 | bytes 64–125 | block `0x1B`, offsets 14–15 |
+
+Same CRC as everywhere else on this board — poly `0xA001`, init `0xFFFF`, stored LSB
+first. On the image this boiler was running when the capture starts:
+
+```
+crc16(image[0:62])   = 0x058F     stored at 62,63 as  8f 05
+crc16(image[0:64])   = 0x0000     <- data + CRC checks to zero
+crc16(image[64:126]) = 0x9A85     stored at 126,127 as 85 9a
+crc16(image[64:128]) = 0x0000
+```
+
+Recom recomputes them inside every write, which is why block `0x17` goes back *changed*
+in both sessions although no parameter in it moved:
+
+| | parameter written | bytes 62,63 |
+|---|---|---|
+| session 1, t=124 s | p33 `4 → 5` (block `0x16`) | `8f 05` → `8e 55` |
+| session 2, t=208 s | p2 `56 → 55` (block `0x14`) | `8e 55` → `9a 50` |
+
+Both recompute correctly from the edited image, and the zero-check holds after each.
+Two independent writes, two different blocks, one rule.
+
+#### That is what `Blocking 0` was
+
+The PCU stores whatever is written to it. What it will not do is *adopt* a set that
+fails its own CRC: at the next identification it finds the store inconsistent with what
+it is running, keeps running the old set and raises `Blocking 0`, *PCU parameter fault*
+— which is exactly what the code is named for.
+
+Every observation that made no sense under the level theory falls out of this one:
+
+- **The value never mattered.** Any change to a covered byte without a CRC update does
+  it. `p33 = 6` was inside its documented `2..15` all along.
+- **Writing the old value back "fixed" it** because it restored agreement with the CRC
+  that was never updated — not because the value was better.
+- **Five resets with no write at all still fell back to `Blocking 0`** (2026-09-16,
+  19:40–19:48). Each reset ran an identification, judged the stored set against the CRC,
+  and failed it again. Nothing about *how* the bytes got there is involved.
+- **Recom's writes never blocked** because Recom's images always check out.
+
+#### The EEPROM dumps taken at the time say the same thing
+
+This does not rest on the capture alone. Three full 2 KB sweeps were taken on
+2026-09-16, before any of this was suspected, and the CRC state in them tracks the
+boiler's condition exactly:
+
+| Dump | p33 | Low-half CRC (bytes 62–63) | Boiler |
+|---|---|---|---|
+| `eeprom_dump_260916.txt`, 15:49 | 6 | stored `058F`, computes `A58D` — **mismatch** | in `Blocking 0` |
+| `eeprom_dump_260916_2.txt`, 18:11 | 4 | stored `058F`, computes `058F` — match | recovered |
+| `eeprom_dump_260916_3.txt`, 20:52 | 4 | stored `058F`, computes `058F` — match | recovered |
+
+The dump made while the boiler was blocked is the one whose stored image fails its own
+CRC, and the stored value `058F` is the CRC of the image *with `p33 = 4`* — the CRC for
+the set the PCU was still running. Writing `4` back "fixed" it by restoring agreement
+with a CRC that no write had ever touched. The high half matched in all three, as it
+would: nothing had written to it.
+
+> Address `0x01`'s parameter blocks fail both CRCs in every dump. That store is
+> sixteen `FF` bytes per block wherever nothing has been written to it — it is not an
+> image, and its CRC is not meaningful. Only `0x00` holds the set the boiler runs on.
+
+#### What is still inferred: the upper half
+
+Bytes 126–127 have never been seen being *maintained* by anything — both of Recom's
+edits were in the low half. That the upper half is protected the same way is not in
+doubt (the stored CRC checks out on every dump and every read), but no writer has been
+observed updating it, and on this appliance none can be. What Recom exposes here is:
+
+| Level | Parameters |
+|---|---|
+| user | p1–p5 |
+| service | p17–p44, **except p22** |
+| anything above p44 | not shown at all |
+
+and its *Communication → EEPROM* item — the raw block editor, which would reach the
+whole 2 KB — is greyed out. So Recom cannot be driven into the upper half at all.
+
+That p17–p44 is one screen is worth noting on its own: p33 and p2 came from different
+menu levels and produced identical frames, so the levels are Recom's, not the board's.
+
+Four parameters on this component's writable list live there — p73, p85, p88 and p105 —
+and a write to any of them exercises the inferred rule. Writing one and watching for
+`Blocking 0` is the only experiment that can settle it.
+
+#### There is no factory level on the wire
+
+`COMMAND 0x09` (`CODE_FACTORY_COMMANDO`) and `EXT 0x52` (`CODE_FACTORY`) **do not appear
+anywhere in the capture.** Recom's write sequence is:
+
+```
+123.603  PC -> PSU  CODE_SERVICE_START  0x08 / 0x0C
+123.876  PC -> PSU  WRITE_EPROM_BLOCK   blk 0x14        ~200 ms apart
+  …                                     blk 0x15 … 0x1B
+125.573  PC -> PSU  CODE_SERVICE_STOP   0x1F / 0x0C
+```
+
+Plain service level, all eight blocks, addressed to `0x00` — byte-for-byte what this
+component already sent. Two details worth copying: Recom unlocks **only** the EEPROM
+address (`0x00`), not `0x01` as well, and it allows ~200 ms per write ACK.
+
+The owner wrote **p2 from Recom's user-level screen and p33 from the level above it**,
+and both produced the identical wire sequence. The levels are Recom's own UI gating;
+the board is told nothing about them.
+
+> The table that used to stand here — service `0x08`/`0x0C` versus factory
+> `0x09`/`0x52`, with the pairing "inferred from the symmetry" — described something
+> that has never been sent by Recom and has no observed effect. `use_factory_mode` on
+> the component is kept only as a way to put the question to a board; nothing depends
+> on it.
+
+#### `SERVICE_CODE` carries no PIN
+
+The 0012 PIN was typed once in this session, **after** both writes, and it produced
+exactly one frame:
+
+```
+02 FE 01 05 0A 37 0B 0000 39E1 03     PC  -> PCU   SERVICE_CODE / IDENTIFICATION, data 00 00
+02 01 FE 06 0A 37 0B 0101 B989 03     PCU -> PC    ACK,                           data 01 01
+```
+
+The PIN itself is nowhere in those bytes, in any encoding, and no write followed it.
+Whatever `0x37` is — a level query is the obvious reading of `00 00` → `01 01` — it is
+not an unlock, and the writes did not need it.
 
 #### What the owner did with Recom
 
-On this appliance, with this PCU, before any of this: **p1, p2, p25, p26, p27 and p28
-written with Recom, cleanly.** No blocking, no power cycle, a seamless transition from
-the old value to the new one with the heating curve recalculating around the new
-footpoint as it went. Reaching the dialog that allowed it needed the **0012 PIN**, and
-once past it **dF and dU were editable too**.
-
-Two things fall out of that immediately:
-
-- **It is not the parameter group.** p25-p28 are group 2, the same group as p33. The
-  XML splits the 98 parameters into four groups - 1 is p1-p5 (bytes 0-4, the handful
-  the front panel owns), 2 is p17-p54, 3 is p55-p107, 4 is p108-p124 - and Recom
-  changed group 2 without trouble.
-- **It is not the value, the address, the block count or the boiler's state.** All four
-  have now been eliminated, each for its own reason, above.
-
-What is left is the **unlock level**. Every parameter write this component has ever
-made used `CODE_SERVICE` - `COMMAND 0x08` with `EXT 0x0C`. Recom was in factory level.
-
-#### The two levels
-
-Both are in Recom's own tables, at the top of this document:
-
-| | COMMAND | EXT | Used by |
-|---|---|---|---|
-| Service | `0x08` start, `0x1F` stop | `0x0C` (`CODE_SERVICE` = 12) | every write this component has made |
-| Factory | `0x09` (`CODE_FACTORY_COMMANDO`) | `0x52` (`CODE_FACTORY` = 82) | **never sent, not once** |
-
-The pairing of `0x09` with `0x52` is inferred from the symmetry with `0x08`/`0x0C`, and
-the re-lock - `0x1F` with the factory EXT - is a guess. Neither has been put to
-hardware yet.
-
-#### Why this explains what service level does
-
-Service level is evidently enough to make `WRITE_EPROM_BLOCK` *legal*: the frame is
-ACKed, the bytes land, and the verify read agrees byte for byte. It is not enough to
-make the PCU **adopt** them. The PCU carries on running the set it already has, and at
-the next identification the store no longer matches it - which is exactly the fault it
-raises, and exactly what it is called: `Blocking 0`, *PCU parameter fault*.
-
-That accounts for every observation, including the ones that made no sense before:
-
-- **The value never mattered.** `p33 = 6` was not invalid; Recom's XML gives it
-  `min="2" max="15"`. Any value other than the one the PCU was already running would
-  have done the same. Writing `04` back "fixed" it only because it restored agreement.
-- **The write procedure never mattered.** Between 19:15:16 and 19:50:34 on 2026-09-16
-  the parameter EEPROM was not touched at all - the two button presses in that window
-  were skipped by the "parameter already reads N" check - and the boiler still fell into
-  `Blocking 0` five separate times, on five manual front-panel resets. Each reset ran an
-  identification (`Blocking 20`, and the front-panel CH max reading 0 while it ran),
-  decided the set was inconsistent, and dropped back to `Blocking 0`. **No write was
-  involved in any of those five.** It is what is *stored*, judged against what the PCU
-  is *running*, and nothing about how it got there.
-- **Why a power cycle was needed afterwards.** Restoring the byte removes the
-  disagreement but does not by itself reload the PCU; the pending re-identification
-  completes on the next restart, which is why `Blocking 20` then cleared to
-  `No blocking` at 17:46:15 and again at 19:53:30.
+Before any of this: p1, p2, p25, p26, p27 and p28 written with Recom, cleanly, no
+blocking, the heating curve recalculating around the new footpoint as it went. That
+remains the fixed point the whole investigation was measured against, and the CRC is
+what it was showing.
 
 #### What was ruled out along the way
 
 Worth recording so it is not re-tried:
 
-- **There is no parameter checksum anywhere in either 2 KB image.** The board's
-  convention is CRC16 poly `0xA001`, init `0xFFFF`, stored LSB first - verified by
-  reproducing the counter block (`a199` -> `0x99A1`) and record `0x40` (`13cc` ->
-  `0xCC13`). Run over the parameter image, that CRC does not produce `85 9A` for any
-  range, and the CRC of the parameter image appears nowhere in either store. The only
-  two apparent hits sit at `0x37+2` and `0x38+2`, inside the locking ring where the map
-  documents an operating-hours field - both records read 39 164 hours, so it is one
-  counter seen twice.
+- **It is not the parameter group.** p25–p28 are group 2, the same group as p33.
+- **It is not the value, the address, the block count or the boiler's state.**
 - **It is not a PSU disagreement.** The PCU has a dedicated code for that,
-  `Blocking 18` *Ident. PSU mismatch*, and it never fired. It raised `Blocking 0`,
-  which names the PCU's own set.
-- **"Parameter CRC fault" is not a PCU-05 string.** It is `language.xml` id 3624, in a
-  block with "OT communication fault slave/master", "Settings unequal to config" and
-  "Detect and save config...", the Avanta/MCBA auto-detect family. The PCU-05 tables are
-  at 2300-2334 (blocking) and 2400-2412 (locking).
-- **The stale `0x16` block at address `0x01`** - p33 = 6, left by the early misdirected
-  writes - is byte-identical across all three EEPROM sweeps and is not involved. The
-  boiler runs happily with `0x00` reading 4 and `0x01` reading 6.
+  `Blocking 18` *Ident. PSU mismatch*, and it never fired.
+- **"Parameter CRC fault" is not a PCU-05 string.** It is `language.xml` id 3624, in
+  the Avanta/MCBA auto-detect family. The PCU-05 tables are at 2300–2334 (blocking) and
+  2400–2412 (locking). The PCU-05 says `Blocking 0` instead.
+
+> An earlier revision concluded **"there is no parameter checksum anywhere in either
+> 2 KB image"**. That search covered whole-image ranges and the counter block; it never
+> tried the two 62-byte halves, which is where the CRCs are. The rest of that bullet
+> still holds — the CRC of the *whole* image appears nowhere, and the two apparent hits
+> inside the locking ring are one operating-hours counter seen twice.
 
 #### What Home Assistant's recorder added
 
@@ -662,43 +744,6 @@ being in standby at the instant of both `p33 = 6` writes, and the attribution of
 write to the button press that caused it. `button.*` entities keep their last-press
 timestamp as state, so the recorder's history of them is a log of every press. Local
 time is UTC+3.
-
-#### How to test it
-
-The component now carries the framework for this; nothing below has been run against
-hardware yet.
-
-1. **`test_factory_mode()`** - "Boiler factory mode self-test". Unlocks both addresses
-   with `0x09`/`0x52`, reads one sample while unlocked, re-locks. Writes nothing and
-   reads no EEPROM, so if the board NAKs `COMMAND 0x09` this is how you find out at no
-   risk. It logs `factory mode readback: byte 62 = ?, byte 63 = ?`. Byte 63 is known to
-   track the service unlock; byte 62 is the candidate for the factory one and has never
-   been seen to move. **If byte 62 goes to 1 here, that is the finding.**
-2. **`send_command_hex()`** - "Boiler send command", driven by the *Boiler command spec*
-   text box: `<recipient> <command> <ext> [payload...]` in hex. The length byte and the
-   CRC are computed, so the only things that can be wrong are the ones being tested.
-   Worth trying: `01 09 52` and `00 09 52`, `01 1F 52`, `01 33 00` (`AUTO_DETECT`, 5 s
-   settle), `01 37 00 0C 00` (`SERVICE_CODE` with the PIN as a payload - the encoding is
-   a guess).
-3. **`send_raw()`** - "Boiler send raw frame", for replaying a captured frame verbatim.
-   A bad CRC is flagged and sent anyway.
-4. **`use_factory_mode: true`** on the component - makes `write_param()` unlock with
-   `0x09`/`0x52` instead of `0x08`/`0x0C`. It is a level, not an addition: the two are
-   never sent together. Leave it off until step 1 shows the board answering `0x09`.
-
-A raw reply is never rejected. A NAK, a truncated frame or silence are all reported -
-when the frame being sent is a guess, the refusal is the result.
-
-#### The thing that would end the guessing
-
-**Put a serial sniffer between Recom and the boiler and capture one parameter write at
-factory level.** That gives the unlock, whatever carries the PIN, the write sequence and
-anything sent afterwards to make the PCU adopt it - exactly, rather than inferred from a
-decompile that has already been wrong once on this point. The owner is looking for a
-Recom build from the period when it was working.
-
-Until then, `use_factory_mode` rests on an inference, and the honest status of this
-whole section is: **the best explanation of every observation so far, and untested.**
 
 ### dF/dU is not in the parameter block
 
@@ -932,10 +977,9 @@ retried.
 
 ### What the component implements
 
-> **Read *Service level is not the commissioning unlock* first.** Everything in this
-> section describes writes made at *service* level, which this board accepts, stores and
-> then declines to adopt. The section below is a correct description of what the code
-> does; it is not a description of a write that works.
+> Since 2026-09-16 a parameter write also **recomputes the image's two CRC16s** before
+> the blocks go out, which is what makes the PCU adopt the result instead of storing it
+> and raising `Blocking 0`. See *What the PCU actually checks: the parameter image CRC*.
 
 Write support now exists in `components/dietrich/dietrich.cpp`, built to this
 specification. It is gated behind `allow_writes` in the YAML and behind
@@ -949,11 +993,16 @@ SAMPLES -> CODE_SERVICE_START x2 -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK
         -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP x2 -> SAMPLES
 ```
 
-With `use_factory_mode: true` the two unlocks and the two re-locks become
-`CODE_FACTORY_COMMANDO` (`0x09`/`0x52`) and its re-lock instead. The shape of the
-transaction is otherwise unchanged, and the two levels are never sent together — see
-*Service level is not the commissioning unlock*, which is also why that option exists
-and why it is off by default.
+Between the read and the write the image is edited **and both CRC16s are recomputed**
+(`apply_param_crcs_`), so what goes back is a set the PCU will adopt. A parameter write
+that does not span all eight blocks is refused outright, because the CRCs cannot be
+recomputed from a partial image. An image that *arrives* failing its own CRC — the state
+every pre-2026-09-16 write of this component's left behind — is reported and then
+repaired by the write going out.
+
+`use_factory_mode: true` swaps the two unlocks and re-locks for `CODE_FACTORY_COMMANDO`
+(`0x09`/`0x52`). The capture shows Recom never sending either, so this is now only a way
+to ask a board what it makes of the command; nothing depends on it and it stays off.
 
 The two `SAMPLES` are what *What cleared it* above cost:
 
@@ -1182,3 +1231,30 @@ tables from the installer:
    `RemehaReceiver.ValidateResponse`, and `RemehaBoilerController.SetParameterModel` /
    `SetEepromData` / `EnableServiceMode`. `DeviceIdentifier` lives next door in
    `RecomLibrary.Core.dll`.
+
+### Capturing Recom on the wire
+
+The decompile was wrong about the PIN and silent about the CRC, so the wire is the
+authority. The service cable is an FTDI FT232R, which USBPcap and Wireshark's `ftdi-ft`
+dissector handle directly — no virtual COM port and no hardware tap needed:
+
+1. Start the USBPcap capture on the root hub the adapter sits on, **before** Recom opens
+   the port, so the connect handshake is in it.
+2. Disconnect the ESP's TX from the boiler first. Its 15-second poll will otherwise
+   collide with Recom mid-write.
+3. Drive Recom: connect, change one parameter, change it back.
+4. `py tools/decode_capture.py capture.pcapng --out trace.txt`.
+
+`tools/decode_capture.py` reassembles both directions, verifies every CRC, names
+commands and EXT codes from the tables above, diffs a `WRITE_EPROM_BLOCK` against the
+block last read so a write reads as *"p33 Hystereses calorif.: 4 -> 5"*, and ends with
+everything unknown, factory-flavoured or PIN-related collected in one place.
+
+Recom 7.3.50 will not display a boiler whose map file it cannot find — it reports
+*"Unknown boiler … data will be stored, but can not be displayed"* and then crashes on
+an empty model list. It downloads those maps from a server that no longer answers. The
+fix is to drop `mapping/PCU-05_P3.xml` into
+`%APPDATA%\Remeha bv\Recom (PCST)\config\overrides\`; the file in this repo is
+byte-identical to the one Recom 7.3.8 carries inside its own bundle. The log at
+`%APPDATA%\Remeha bv\Recom (PCST)\logs\pcservicetool.log` names the exact path it
+looked in.
