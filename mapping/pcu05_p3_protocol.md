@@ -297,16 +297,56 @@ service-mode check and for the boot re-lock, and logs both bytes.
 > byte 63, so existing configurations keep their meaning. On this board it is
 > `rs232_mode` that moves.
 
-That leaves (1) as the standing explanation, plus one difference from Recom that
-had gone unnoticed: **this component's parameter reads are addressed to `0x00`,
-while Recom addresses everything on the write path to `0x01`.** A frame aimed at a
-different device in the middle of an unlock/write sequence is a cheaper suspect
-than the block count, so it is worth eliminating first. Inside a write transaction
-the component now uses the `0x01` read frames listed under *Reading a parameter*;
-polling still uses `0x00`, which is known to work.
+### The read address was not it either
 
-If a single-block write is still ACKed and ignored with every frame addressed to
-`0x01`, the remaining difference from Recom is the block count, and (1) is next.
+One further difference from Recom had gone unnoticed: this component's parameter
+reads were addressed to `0x00`, while Recom addresses everything on the write path
+to `0x01`. A frame aimed at a different device in the middle of an unlock/write
+sequence is a cheaper suspect than the block count, so it was eliminated first.
+Inside a write transaction the component now uses the `0x01` read frames listed
+under *Reading a parameter*; polling still uses `0x00`, which is known to work.
+
+Retested on the same board with every frame addressed to `0x01` — unlock, read,
+write, re-lock. The unlock was confirmed engaged (byte 63 = 1) and the reads came
+back from `0x01` as expected. **The write was ACKed and p33 still did not move.**
+So the destination address is not the cause, and the burner state is not either:
+the attempts span both `state 8` (controlled stop) and `state 3` (burning CH).
+
+### What the component does now
+
+That leaves the block count as the only remaining difference from Recom, so
+`write_param()` now does what `SetParameterModel` does — it writes the **whole**
+parameter block in one service-mode session:
+
+```
+CODE_SERVICE_START
+READ_EPROM_BLOCK  0x14 .. 0x1B      (8 frames)
+WRITE_EPROM_BLOCK 0x14 .. 0x1B      (8 frames, 127 bytes verbatim + 1 edited)
+READ_EPROM_BLOCK  0x14 .. 0x1B      (8 frames, to verify)
+CODE_SERVICE_STOP
+```
+
+26 exchanges, around three seconds, borrowing one poll interval. `write_param()`
+uses this; `write_block_unchanged()` stays deliberately single-block, as the
+frame-level diagnostic it always was — on this board it is expected to be ignored.
+
+Handing back 127 bytes verbatim is a real step up in risk from one block, because
+the bytes include the gas/air settings and the controller-protection limits. Two
+guards stand in front of it:
+
+- **Every block must have been read by this transaction**, whole and CRC-valid.
+  A missing block aborts to the re-lock without writing anything.
+- **The image must be plausible.** Before any of it goes back, 58 documented
+  parameters — deliberately including every one this component refuses to write —
+  are checked against the ranges in the table below. A block that arrived mangled
+  but with a valid CRC shows up as a parameter outside its range, and the whole
+  transaction is refused with the offending byte named. All 58 fall inside their
+  ranges on the live image above, so the check does not fire spuriously.
+
+If the boiler still declines a full-block write, the next things to look at are
+`SERVICE_CODE` (`0x37`, the 0012 PIN Recom asks for, which the IL says is never
+sent) and `IDENTIFICATION` (`0x01`/`0x0B`), which Recom issues when it connects
+and this component never does.
 
 ### What the component implements
 

@@ -143,6 +143,36 @@ static const ParamLimit PARAM_LIMITS[] = {
 };
 static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMITS[0]);
 
+// Every documented parameter of the P3 map with a range narrow enough to be worth
+// checking, used to sanity-check a freshly read image before any of it is handed
+// back to the boiler. This is the opposite list from PARAM_LIMITS above: it exists
+// precisely to cover the parameters this component will never write - the gas/air
+// settings and the controller-protection limits - because a full-block write
+// returns them verbatim and a corrupted read would otherwise carry them into
+// EEPROM.
+//
+// `A x 100` parameters are stored divided by 100, so a documented 1000..10000 is a
+// stored 10..100. Verified against a live PCU-05 P3 image: all 58 entries fall
+// inside their range.
+static const ParamLimit PARAM_SANITY[] = {
+    {1, 0, 20, 90},      {2, 1, 40, 65},      {3, 2, 0, 3},        {4, 3, 0, 2},
+    {5, 4, 0, 99},       {17, 16, 10, 100},   {18, 17, 10, 100},   {19, 18, 10, 50},
+    {20, 19, 0, 99},     {21, 20, 10, 50},    {23, 22, 20, 90},    {24, 23, 1, 255},
+    {25, 24, 0, 30},     {26, 25, 0, 90},     {28, 27, 2, 10},     {29, 28, 2, 10},
+    {31, 30, 0, 2},      {32, 31, 0, 25},     {33, 32, 2, 15},     {34, 33, 0, 1},
+    {35, 34, 0, 3},      {36, 35, 1, 3},      {37, 36, 0, 1},      {38, 37, 0, 1},
+    {40, 39, 0, 2},      {41, 40, 0, 2},      {44, 43, 0, 2},      {55, 54, 20, 100},
+    {56, 55, 20, 100},   {57, 56, 20, 100},   {58, 57, 0, 1},      {69, 68, 0, 60},
+    {70, 69, 10, 40},    {72, 71, 0, 100},    {73, 72, 1, 10},     {74, 73, 10, 180},
+    {75, 74, 1, 15},     {76, 75, 3, 15},     {77, 76, 10, 100},   {78, 77, 10, 100},
+    {79, 78, 5, 40},     {80, 79, 0, 100},    {81, 80, 0, 100},    {82, 81, 0, 100},
+    {85, 84, 0, 20},     {88, 87, 1, 10},     {89, 88, 0, 20},     {90, 89, 0, 20},
+    {91, 90, 0, 100},    {92, 91, 0, 100},    {94, 93, 1, 99},     {95, 94, 1, 255},
+    {97, 96, 0, 1},      {101, 100, 0, 99},   {105, 104, 0, 10},   {107, 106, 1, 255},
+    {110, 109, 0, 110},  {112, 111, 0, 100},
+};
+static const size_t PARAM_SANITY_LEN = sizeof(PARAM_SANITY) / sizeof(PARAM_SANITY[0]);
+
 static const CodeText STATUS_CODES[] = {
     {0, "0:Standby"},
     {1, "1:Boiler start"},
@@ -457,6 +487,13 @@ void Dietrich::pub_counter_(sensor::Sensor *s, size_t off, float scale) {
 }
 
 void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const {
+  if (is_write_req_(req)) {
+    // built per block by build_write_frame_(), just before it is sent
+    *cmd = this->tx_buf_;
+    *len = DIETRICH_WRITE_FRAME_LEN;
+    return;
+  }
+
   if (req >= DIETRICH_REQ_PARAM0) {
     const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
     // inside a write transaction, address the PCU exactly as Recom does
@@ -474,11 +511,6 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
     case DIETRICH_REQ_SERVICE_OFF:
       *cmd = CMD_SERVICE_OFF_REMEHA;
       *len = sizeof(CMD_SERVICE_OFF_REMEHA);
-      break;
-    case DIETRICH_REQ_WRITE_BLOCK:
-      // built per transaction by build_write_frame_(), just before it is sent
-      *cmd = this->tx_buf_;
-      *len = DIETRICH_WRITE_FRAME_LEN;
       break;
     case DIETRICH_REQ_COUNTER1:
       *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
@@ -616,7 +648,7 @@ void Dietrich::decode_sample_() {
     if (this->allow_writes_ && this->d_(63) != 0) {
       ESP_LOGW(TAG, "boiler is in service mode at boot (sample byte 63 = %u), re-locking",
                static_cast<unsigned>(this->d_(63)));
-      this->stage_txn_(DIETRICH_TXN_RELOCK, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, "boot re-lock");
+      this->stage_txn_(DIETRICH_TXN_RELOCK, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "boot re-lock");
     }
   }
 }
@@ -697,15 +729,22 @@ void Dietrich::decode_params_() {
 }
 
 uint32_t Dietrich::timeout_for_(DietrichRequest req) {
-  return req == DIETRICH_REQ_WRITE_BLOCK ? WRITE_TIMEOUT_MS : RESPONSE_TIMEOUT_MS;
+  return is_write_req_(req) ? WRITE_TIMEOUT_MS : RESPONSE_TIMEOUT_MS;
+}
+
+bool Dietrich::is_write_req_(DietrichRequest req) {
+  return req >= DIETRICH_REQ_WRITE0 && req < DIETRICH_REQ_PARAM0;
+}
+
+uint8_t Dietrich::block_of_(DietrichRequest req) {
+  const uint8_t base = is_write_req_(req) ? DIETRICH_REQ_WRITE0 : DIETRICH_REQ_PARAM0;
+  return static_cast<uint8_t>(DIETRICH_PARAM_FIRST_BLOCK + (req - base));
 }
 
 // 02 | FE | 01 | 05 | 18 | 11 | blk | 16 data bytes | CRClo CRChi | 03
 //
-// The payload is the block as the boiler just reported it, with the staged edit
-// applied on top. Fifteen of those sixteen bytes are unrelated parameters going
-// back verbatim, which is why the read has to belong to this transaction rather
-// than to the hourly sweep.
+// The payload comes from txn_image_, which begin_write_phase_() assembled out of
+// the blocks this transaction read for itself plus the one staged edit.
 void Dietrich::build_write_frame_(uint8_t block) {
   const size_t base = (static_cast<size_t>(block) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
 
@@ -718,11 +757,7 @@ void Dietrich::build_write_frame_(uint8_t block) {
   this->tx_buf_[6] = block;
 
   for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
-    this->tx_buf_[7 + i] = this->params_[base + i];
-
-  // an identity write sends the block back untouched; only a parameter write edits
-  if (this->txn_kind_ == DIETRICH_TXN_PARAM)
-    this->tx_buf_[7 + this->pending_offset_] = this->pending_value_;
+    this->tx_buf_[7 + i] = this->txn_image_[base + i];
 
   const uint16_t crc = crc16_(this->tx_buf_, 1, DIETRICH_WRITE_FRAME_LEN - 3);
   this->tx_buf_[DIETRICH_WRITE_FRAME_LEN - 3] = static_cast<uint8_t>(crc & 0xFF);
@@ -730,7 +765,78 @@ void Dietrich::build_write_frame_(uint8_t block) {
   this->tx_buf_[DIETRICH_WRITE_FRAME_LEN - 1] = 0x03;
 }
 
-bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t block, uint8_t offset, uint8_t value, const char *what) {
+// Every documented parameter inside the blocks about to be written must read
+// inside its documented range. This is not about validating what the user asked
+// for - write_param() already clamped that - it is about refusing to hand back an
+// image that cannot have come off a working boiler.
+//
+// It matters most for a full-block write, where 127 of the 128 bytes are being
+// returned verbatim and several of them are combustion settings. A block that
+// arrived mangled but with a valid CRC, or a params_ buffer that never got filled,
+// shows up here as a parameter outside its range.
+bool Dietrich::image_is_sane_() const {
+  const size_t lo =
+      (static_cast<size_t>(this->txn_first_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
+  const size_t hi = lo + static_cast<size_t>(this->txn_block_count_) * DIETRICH_PARAM_BLOCK_SIZE;
+
+  bool sane = true;
+  for (size_t i = 0; i < PARAM_SANITY_LEN; i++) {
+    const ParamLimit &s = PARAM_SANITY[i];
+    if (s.offset < lo || s.offset >= hi)
+      continue;
+    const uint8_t v = this->params_[s.offset];
+    if (v < s.min || v > s.max) {
+      ESP_LOGE(TAG, "refusing to write: p%u (byte %u) reads %u, outside its documented %u..%u",
+               static_cast<unsigned>(s.param), static_cast<unsigned>(s.offset), static_cast<unsigned>(v),
+               static_cast<unsigned>(s.min), static_cast<unsigned>(s.max));
+      sane = false;
+    }
+  }
+  return sane;
+}
+
+bool Dietrich::begin_write_phase_() {
+  const uint8_t first = static_cast<uint8_t>(this->txn_first_block_ - DIETRICH_PARAM_FIRST_BLOCK);
+  uint8_t need = 0;
+  for (uint8_t i = 0; i < this->txn_block_count_; i++)
+    need = static_cast<uint8_t>(need | (1u << (first + i)));
+
+  // Nothing is written unless this transaction read every block it is about to
+  // write, whole and CRC-valid. Otherwise the bytes going back would be whatever
+  // happened to be left in params_.
+  if ((this->txn_blocks_read_ & need) != need) {
+    ESP_LOGE(TAG, "refusing to write: blocks read mask 0x%02X, needed 0x%02X",
+             static_cast<unsigned>(this->txn_blocks_read_), static_cast<unsigned>(need));
+    this->txn_failed_ = true;
+    this->skip_to_relock_();
+    return false;
+  }
+
+  if (!this->image_is_sane_()) {
+    this->txn_failed_ = true;
+    this->skip_to_relock_();
+    return false;
+  }
+
+  memcpy(this->txn_image_, this->params_, DIETRICH_PARAM_BYTES);
+
+  if (this->txn_kind_ == DIETRICH_TXN_PARAM) {
+    // A parameter that already holds the wanted value is not worth an EEPROM
+    // cycle, and endurance is finite. The check waits until here because it needs
+    // the block this transaction just read, not a stale copy from the sweep.
+    if (this->params_[this->pending_byte_] == this->pending_value_) {
+      ESP_LOGI(TAG, "parameter already reads %u, skipping the write", static_cast<unsigned>(this->pending_value_));
+      this->skip_to_relock_();
+      return false;
+    }
+    this->txn_image_[this->pending_byte_] = this->pending_value_;
+  }
+
+  return true;
+}
+
+bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_count, uint8_t byte_offset,
+                          uint8_t value, const char *what) {
   if (!this->allow_writes_) {
     ESP_LOGW(TAG, "%s refused: allow_writes is not set on the dietrich component", what);
     return false;
@@ -748,14 +854,17 @@ bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t block, uint8_t offset, uint8_
   }
 
   this->pending_txn_ = txn;
-  this->pending_block_ = block;
-  this->pending_offset_ = offset;
+  this->pending_first_block_ = first_block;
+  this->pending_block_count_ = block_count;
+  this->pending_byte_ = byte_offset;
   this->pending_value_ = value;
   ESP_LOGI(TAG, "%s queued", what);
   return true;
 }
 
-bool Dietrich::test_service_mode() { return this->stage_txn_(DIETRICH_TXN_SERVICE_TEST, 0, 0, 0, "service mode test"); }
+bool Dietrich::test_service_mode() {
+  return this->stage_txn_(DIETRICH_TXN_SERVICE_TEST, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, 0, "service mode test");
+}
 
 bool Dietrich::write_block_unchanged(uint8_t block) {
   char what[48];
@@ -765,7 +874,7 @@ bool Dietrich::write_block_unchanged(uint8_t block) {
              static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK), static_cast<unsigned>(DIETRICH_PARAM_LAST_BLOCK));
     return false;
   }
-  return this->stage_txn_(DIETRICH_TXN_IDENTITY, block, 0, 0, what);
+  return this->stage_txn_(DIETRICH_TXN_IDENTITY, block, 1, 0, 0, what);
 }
 
 bool Dietrich::write_param(uint8_t param, uint8_t value) {
@@ -795,23 +904,27 @@ bool Dietrich::write_param(uint8_t param, uint8_t value) {
 
   char what[48];
   snprintf(what, sizeof(what), "write of p%u = %u", static_cast<unsigned>(param), static_cast<unsigned>(clamped));
-  const uint8_t block = static_cast<uint8_t>(DIETRICH_PARAM_FIRST_BLOCK + lim->offset / DIETRICH_PARAM_BLOCK_SIZE);
-  const uint8_t offset = static_cast<uint8_t>(lim->offset % DIETRICH_PARAM_BLOCK_SIZE);
-  return this->stage_txn_(DIETRICH_TXN_PARAM, block, offset, clamped, what);
+  // The whole parameter block, as Recom does: SetParameterModel never writes a
+  // single block, it always sends 0x14..0x1B in one service-mode session, and a
+  // PCU-05 P3 ACKs a lone block write and then ignores it. See
+  // mapping/pcu05_p3_protocol.md.
+  return this->stage_txn_(DIETRICH_TXN_PARAM, DIETRICH_PARAM_FIRST_BLOCK, DIETRICH_PARAM_BLOCKS, lim->offset,
+                          clamped, what);
 }
 
 void Dietrich::start_txn_() {
   this->txn_kind_ = this->pending_txn_;
-  this->txn_block_ = this->pending_block_;
+  this->txn_first_block_ = this->pending_first_block_;
+  this->txn_block_count_ = this->pending_block_count_;
   this->pending_txn_ = DIETRICH_TXN_NONE;
   this->txn_active_ = true;
   this->txn_failed_ = false;
-  this->txn_read_ok_ = false;
   this->txn_wrote_ = false;
+  this->txn_blocks_read_ = 0;
   this->queue_pos_ = 0;
 
-  const DietrichRequest block_read =
-      static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + (this->txn_block_ - DIETRICH_PARAM_FIRST_BLOCK));
+  const uint8_t first = static_cast<uint8_t>(this->txn_first_block_ - DIETRICH_PARAM_FIRST_BLOCK);
+  const uint8_t count = this->txn_block_count_;
 
   uint8_t n = 0;
   switch (this->txn_kind_) {
@@ -822,16 +935,22 @@ void Dietrich::start_txn_() {
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
       // A sample taken while unlocked is the only way to find out whether the
       // unlock did anything: CODE_SERVICE_START's ACK is a bare echo with no
-      // payload, so it proves the frame was understood, not that service mode
-      // is on. Sample byte 62 reports the actual state.
+      // payload, so it proves the frame was understood, not that service mode is
+      // on. On a PCU-05 P3 the flag is sample byte 63.
       this->queue_[n++] = DIETRICH_REQ_SAMPLE;
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
     default:
+      // Read every block, then write every block, then read them all back. The
+      // reads belong to this transaction because the bytes they return go
+      // straight back to the boiler.
       this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
-      this->queue_[n++] = block_read;  // fresh copy to modify
-      this->queue_[n++] = DIETRICH_REQ_WRITE_BLOCK;
-      this->queue_[n++] = block_read;  // read back to verify
+      for (uint8_t i = 0; i < count; i++)
+        this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
+      for (uint8_t i = 0; i < count; i++)
+        this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_WRITE0 + first + i);
+      for (uint8_t i = 0; i < count; i++)
+        this->queue_[n++] = static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + first + i);
       this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
       break;
   }
@@ -863,21 +982,29 @@ void Dietrich::finish_txn_() {
 
   if (this->txn_failed_) {
     ESP_LOGE(TAG, "%s failed; service mode was re-locked, nothing was retried", kind);
+    // The re-lock's own reply may be what failed, in which case we do not know
+    // the boiler is locked. Re-arm the boot check so the next sample settles it.
+    this->seen_sample_ = false;
   } else if (this->txn_wrote_) {
-    // params_ now holds the verify read, tx_buf_ holds what actually went out
-    const size_t base =
-        (static_cast<size_t>(this->txn_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
-    bool same = true;
-    for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++) {
-      if (this->params_[base + i] != this->tx_buf_[7 + i])
-        same = false;
+    // params_ now holds the verify reads, txn_image_ what the boiler was told
+    const size_t lo =
+        (static_cast<size_t>(this->txn_first_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
+    const size_t hi = lo + static_cast<size_t>(this->txn_block_count_) * DIETRICH_PARAM_BLOCK_SIZE;
+    size_t differing = 0, first_diff = 0;
+    for (size_t i = lo; i < hi; i++) {
+      if (this->params_[i] != this->txn_image_[i]) {
+        if (differing == 0)
+          first_diff = i;
+        differing++;
+      }
     }
-    if (same) {
-      ESP_LOGI(TAG, "%s of block 0x%02X verified", kind, static_cast<unsigned>(this->txn_block_));
+    if (differing == 0) {
+      ESP_LOGI(TAG, "%s verified: %u block(s) from 0x%02X read back exactly as written", kind,
+               static_cast<unsigned>(this->txn_block_count_), static_cast<unsigned>(this->txn_first_block_));
     } else {
-      ESP_LOGE(TAG, "%s of block 0x%02X was ACKed but reads back different: sent %s, got %s", kind,
-               static_cast<unsigned>(this->txn_block_), hex_str_(this->tx_buf_ + 7, DIETRICH_PARAM_BLOCK_SIZE).c_str(),
-               hex_str_(this->params_ + base, DIETRICH_PARAM_BLOCK_SIZE).c_str());
+      ESP_LOGE(TAG, "%s was ACKed but %u byte(s) read back different; first is byte %u: wrote %u, read %u", kind,
+               static_cast<unsigned>(differing), static_cast<unsigned>(first_diff),
+               static_cast<unsigned>(this->txn_image_[first_diff]), static_cast<unsigned>(this->params_[first_diff]));
     }
   } else {
     ESP_LOGI(TAG, "%s finished, nothing was written", kind);
@@ -885,8 +1012,8 @@ void Dietrich::finish_txn_() {
 
   this->txn_active_ = false;
   this->txn_failed_ = false;
-  this->txn_read_ok_ = false;
   this->txn_wrote_ = false;
+  this->txn_blocks_read_ = 0;
   this->txn_kind_ = DIETRICH_TXN_NONE;
 }
 
@@ -895,8 +1022,10 @@ bool Dietrich::handle_response_() {
   char param_what[16];
   const char *what;
   if (req >= DIETRICH_REQ_PARAM0) {
-    snprintf(param_what, sizeof(param_what), "param 0x%02X",
-             static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK + (req - DIETRICH_REQ_PARAM0)));
+    snprintf(param_what, sizeof(param_what), "param 0x%02X", static_cast<unsigned>(block_of_(req)));
+    what = param_what;
+  } else if (is_write_req_(req)) {
+    snprintf(param_what, sizeof(param_what), "write 0x%02X", static_cast<unsigned>(block_of_(req)));
     what = param_what;
   } else {
     switch (req) {
@@ -911,9 +1040,6 @@ bool Dietrich::handle_response_() {
         break;
       case DIETRICH_REQ_SERVICE_OFF:
         what = "service mode off";
-        break;
-      case DIETRICH_REQ_WRITE_BLOCK:
-        what = "eeprom write";
         break;
       default:
         what = "sample";
@@ -953,21 +1079,23 @@ bool Dietrich::handle_response_() {
     for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
       this->params_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
     this->param_blocks_seen_ |= static_cast<uint8_t>(1u << blk);
-    // a whole block, for the block this transaction is about to write
-    if (this->txn_active_ && this->txn_block_ == DIETRICH_PARAM_FIRST_BLOCK + blk)
-      this->txn_read_ok_ = true;
+    // a whole block, read inside this transaction: safe to write back
+    if (this->txn_active_)
+      this->txn_blocks_read_ |= static_cast<uint8_t>(1u << blk);
     // publish only once the whole sweep is in, so the values are consistent
     if (this->param_blocks_seen_ == 0xFF)
       this->decode_params_();
     return true;
   }
 
-  if (req == DIETRICH_REQ_WRITE_BLOCK) {
+  if (is_write_req_(req)) {
     // An ACK is an ordinary response frame carrying no data, and
     // response_error_() has already checked the type byte, the swapped
     // addresses and the echoed COMMAND/EXT_COMMAND - so there is nothing left
-    // to decode, and getting this far is the acknowledgement.
-    ESP_LOGI(TAG, "block 0x%02X write ACKed", static_cast<unsigned>(this->txn_block_));
+    // to decode, and getting this far is the acknowledgement. It is not,
+    // however, evidence that the boiler applied anything; that is what the
+    // verify reads are for.
+    ESP_LOGD(TAG, "block 0x%02X write ACKed", static_cast<unsigned>(block_of_(req)));
     this->txn_wrote_ = true;
     return true;
   }
@@ -996,31 +1124,12 @@ void Dietrich::send_request_() {
 
   const DietrichRequest req = this->queue_[this->queue_pos_];
 
-  if (req == DIETRICH_REQ_WRITE_BLOCK) {
-    // Nothing is written unless this transaction's own read of the block came
-    // back whole. Without it, fifteen unrelated parameters would go to EEPROM as
-    // whatever happened to be sitting in params_.
-    if (!this->txn_read_ok_) {
-      ESP_LOGE(TAG, "refusing to write block 0x%02X: its read did not land",
-               static_cast<unsigned>(this->txn_block_));
-      this->txn_failed_ = true;
-      this->skip_to_relock_();
+  if (is_write_req_(req)) {
+    const uint8_t blk = block_of_(req);
+    // everything is decided once, at the first block of the write phase
+    if (blk == this->txn_first_block_ && !this->begin_write_phase_())
       return;
-    }
-    // A parameter that already holds the wanted value is not worth an EEPROM
-    // cycle, and EEPROM endurance is finite. The check waits until here because
-    // it needs the block this transaction just read, not a stale copy.
-    if (this->txn_kind_ == DIETRICH_TXN_PARAM) {
-      const size_t off =
-          (static_cast<size_t>(this->txn_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE +
-          this->pending_offset_;
-      if (this->params_[off] == this->pending_value_) {
-        ESP_LOGI(TAG, "parameter already reads %u, skipping the write", static_cast<unsigned>(this->pending_value_));
-        this->skip_to_relock_();
-        return;
-      }
-    }
-    this->build_write_frame_(this->txn_block_);
+    this->build_write_frame_(blk);
   }
 
   // drop anything left over from a previous exchange
@@ -1030,8 +1139,8 @@ void Dietrich::send_request_() {
   const uint8_t *cmd = nullptr;
   size_t len = 0;
   this->command_for_(req, &cmd, &len);
-  if (req == DIETRICH_REQ_WRITE_BLOCK)
-    ESP_LOGI(TAG, "writing block 0x%02X: %s", static_cast<unsigned>(this->txn_block_), hex_str_(cmd, len).c_str());
+  if (is_write_req_(req))
+    ESP_LOGI(TAG, "writing block 0x%02X: %s", static_cast<unsigned>(block_of_(req)), hex_str_(cmd, len).c_str());
   this->write_array(cmd, len);
 
   this->rx_len_ = 0;

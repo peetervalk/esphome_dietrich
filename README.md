@@ -87,11 +87,15 @@ to uncomment, in the order they are worth trying:
 |---|---|
 | `test_service_mode()` | unlock, read a sample back to confirm it engaged, re-lock |
 | `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
-| `write_param(p, v)` | read-modify-write one parameter |
+| `write_param(p, v)` | read the whole parameter block, change one byte, write it all back |
 
-Each write is a single transaction that unlocks service mode, re-reads the block
-it is about to modify, writes it, reads it back to verify and re-locks — and
-that re-lock happens whether or not the write succeeded. Values are clamped to
+A parameter write is a single transaction that unlocks service mode, re-reads all
+eight EEPROM blocks, writes them all back with one byte changed, reads them back
+to verify and re-locks — and that re-lock happens whether or not the write
+succeeded. It writes the whole block because Recom does, and because a PCU-05 P3
+ACKs a single-block write and then ignores it. Before anything is written back,
+58 documented parameters in the freshly read image are checked against their
+ranges, so a corrupted read is refused rather than returned to EEPROM. Values are clamped to
 the documented range; a value the boiler already holds is not written at all,
 because EEPROM endurance is finite; and the gas/air settings (p17-p21, p77, p78)
 and the controller-protection limits (p55-p57) are refused outright, because a

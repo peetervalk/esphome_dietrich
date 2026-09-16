@@ -292,10 +292,10 @@ sensor:
 #
 #   # 2. Read EEPROM block 0x16 and write it straight back, byte for byte. Safe,
 #   #    because it changes nothing - but note what it cannot tell you: writing
-#   #    identical bytes reads back identical either way, so "identity write of
-#   #    block 0x16 verified" means the frame was accepted, NOT that the board
-#   #    applied it. Use it to check the frame is well formed, not to conclude
-#   #    that writing works.
+#   #    identical bytes reads back identical either way, so "identity write
+#   #    verified" means the frame was accepted, NOT that the board applied it.
+#   #    It stays single-block on purpose, as a frame-level check - on a PCU-05
+#   #    P3 a lone block write is expected to be ignored.
 #   - platform: template
 #     name: "Boiler identity write block 0x16"
 #     entity_category: diagnostic
@@ -309,10 +309,12 @@ sensor:
 #   #    boiler already holds that value - so pressing this twice costs one
 #   #    EEPROM cycle, not two.
 #   #
-#   #    A PCU-05 P3 has been observed ACKing this write and leaving p33 alone,
-#   #    which the component reports as "was ACKed but reads back different".
-#   #    That is the boiler declining, not a bug in the frame - see
-#   #    mapping/pcu05_p3_protocol.md.
+#   #    This writes all eight EEPROM blocks in one service-mode session, as
+#   #    Recom does - a PCU-05 P3 ACKs a single-block write and then ignores it.
+#   #    That is 26 exchanges and about three seconds, and it borrows one poll
+#   #    interval. The freshly read image is range-checked before any of it goes
+#   #    back, so a corrupted read is refused rather than written into EEPROM.
+#   #    See mapping/pcu05_p3_protocol.md.
 #   - platform: template
 #     name: "Boiler set DHW hysteresis to 6"
 #     entity_category: config

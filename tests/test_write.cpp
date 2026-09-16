@@ -45,6 +45,22 @@ void TextSensor::publish_state(std::string state) { (void) state; }
 // ---------------------------------------------------------------------------
 // the simulated boiler
 // ---------------------------------------------------------------------------
+
+// The 128 byte parameter block as read off a live PCU-05 P3 (blocks 0x14..0x1B).
+// Synthetic filler will not do: the component sanity-checks a freshly read image
+// against the documented parameter ranges before writing any of it back, and
+// filler is - correctly - refused. p1 = 61, p2 = 56, p33 = 4.
+static const uint8_t REAL_PARAM_IMAGE[128] = {
+    0x3D, 0x38, 0x01, 0x00, 0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x2F, 0x2F, 0x0B, 0x50, 0x17, 0xFF, 0x5A, 0x23, 0x1E, 0x19, 0xFA, 0x03, 0x0A, 0xF6, 0x00, 0x18,
+    0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0xAF, 0x1E, 0x02, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x32, 0x3C, 0x50, 0x00, 0xC8, 0x05, 0x00, 0x12, 0x8F, 0x05,
+    0xFF, 0x28, 0x46, 0x5A, 0x32, 0x19, 0x05, 0x1E, 0x0A, 0x1E, 0x03, 0x09, 0x41, 0x41, 0x14, 0x64,
+    0x64, 0x64, 0x07, 0x46, 0x05, 0x05, 0x1E, 0x02, 0x05, 0x00, 0x28, 0x00, 0x00, 0x0F, 0xBC, 0x09,
+    0x00, 0x78, 0x00, 0x0A, 0x05, 0x1E, 0x65, 0x4B, 0x00, 0xFE, 0x0A, 0x00, 0x0A, 0x64, 0xFF, 0x28,
+    0x1A, 0x02, 0x05, 0x05, 0x02, 0x02, 0x05, 0x14, 0x14, 0x19, 0x05, 0xFF, 0xFF, 0xFF, 0x85, 0x9A,
+};
+
 struct FakeBoiler {
   uint8_t eeprom[12][16]{};  // blocks 0x14..0x1F
   bool service_mode{false};
@@ -65,15 +81,12 @@ struct FakeBoiler {
   std::deque<uint8_t> tx;  // bytes heading for the ESP
 
   void reset() {
-    for (int b = 0; b < 12; b++)
+    for (int b = 0; b < 8; b++)
       for (int i = 0; i < 16; i++)
-        eeprom[b][i] = static_cast<uint8_t>(0xA0 + b);  // recognisable filler
-    // a plausible tank configuration, from the live capture in the protocol doc
-    eeprom[0][0] = 80;  // p1  CH max flow
-    eeprom[0][1] = 56;  // p2  DHW setpoint
-    eeprom[1][15] = 24; // p32 setpoint raise
-    eeprom[2][0] = 4;   // p33 hysteresis calorifier
-    eeprom[6][8] = 0;   // p105 offset calorifier
+        eeprom[b][i] = REAL_PARAM_IMAGE[b * 16 + i];
+    for (int b = 8; b < 12; b++)
+      for (int i = 0; i < 16; i++)
+        eeprom[b][i] = static_cast<uint8_t>(0xA0 + b);  // counter blocks, filler
     service_mode = false;
     answer_reads = answer_writes = answer_service = true;
     require_service_for_write = true;
@@ -205,7 +218,8 @@ static bool logged(const char *needle) {
   return false;
 }
 
-static void pump(esphome::dietrich::Dietrich &d, int steps = 400) {
+// a full parameter write is 26 exchanges, so give it room
+static void pump(esphome::dietrich::Dietrich &d, int steps = 700) {
   for (int i = 0; i < steps; i++) {
     d.loop();
     g_millis += 10;
@@ -261,9 +275,9 @@ int main() {
     g_boiler.writes_take_effect = false;
     check(d->write_param(33, 6), "request accepted");
     pump(*d);
-    check(g_boiler.writes == 1, "a write frame was sent");
+    check(g_boiler.writes == 8, "the whole parameter block was written");
     check(g_boiler.eeprom[2][0] == 4, "EEPROM unchanged, as the boiler chose");
-    check(logged("was ACKed but reads back different"), "caught by the verify read, not trusted from the ACK");
+    check(logged("read back different"), "caught by the verify read, not trusted from the ACK");
     check(!g_boiler.service_mode, "boiler left locked");
     delete d;
   }
@@ -276,10 +290,10 @@ int main() {
     memcpy(before, g_boiler.eeprom[2], 16);
     check(d->write_block_unchanged(0x16), "request accepted");
     pump(*d);
-    check(g_boiler.writes == 1, "exactly one write frame sent");
+    check(g_boiler.writes == 1, "exactly one write frame sent - identity write stays single-block");
     check(memcmp(before, g_boiler.eeprom[2], 16) == 0, "EEPROM byte-for-byte unchanged");
     check(!g_boiler.service_mode, "boiler left locked");
-    check(logged("identity write of block 0x16 verified"), "verified by read-back");
+    check(logged("identity write verified: 1 block(s) from 0x16"), "verified by read-back");
     if (!g_boiler.written_frames.empty()) {
       const auto &f = g_boiler.written_frames[0];
       check(f.size() == 26, "write frame is 26 bytes");
@@ -295,15 +309,18 @@ int main() {
   {
     begin("write p33 (hysteresis calorifier) 4 -> 6");
     auto *d = make();
-    uint8_t before[16];
-    memcpy(before, g_boiler.eeprom[2], 16);
     check(d->write_param(33, 6), "request accepted");
     pump(*d);
-    check(g_boiler.writes == 1, "exactly one write frame sent");
+    check(g_boiler.writes == 8, "all eight parameter blocks written, as Recom does");
     check(g_boiler.eeprom[2][0] == 6, "p33 now reads 6");
-    check(memcmp(before + 1, g_boiler.eeprom[2] + 1, 15) == 0, "the other 15 bytes of the block are untouched");
+    size_t changed = 0;
+    for (int b = 0; b < 8; b++)
+      for (int i = 0; i < 16; i++)
+        if (g_boiler.eeprom[b][i] != REAL_PARAM_IMAGE[b * 16 + i])
+          changed++;
+    check(changed == 1, "exactly one byte of the whole 128 byte image changed");
     check(!g_boiler.service_mode, "boiler left locked");
-    check(logged("parameter write of block 0x16 verified"), "verified by read-back");
+    check(logged("parameter write verified: 8 block(s) from 0x14"), "verified by read-back");
     bool all_to_pcu = !g_boiler.read_dests.empty();
     for (uint8_t a : g_boiler.read_dests)
       if (a != 0x01)
@@ -343,6 +360,23 @@ int main() {
 
     g_log.clear();
     check(!d->write_block_unchanged(0x1C), "identity write outside 0x14..0x1B refused");
+    delete d;
+  }
+
+  // -- 5b. an implausible read is refused rather than written back -----------
+  {
+    begin("a block that reads back implausibly is not written back");
+    auto *d = make();
+    // p17 (Full load HTG) is stored divided by 100, so 200 would mean 20000 rpm
+    // against a documented 1000..10000. A real block never looks like this, so
+    // this stands in for a corrupted read that still had a valid CRC.
+    g_boiler.eeprom[1][0] = 200;
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(g_boiler.writes == 0, "nothing written at all");
+    check(g_boiler.eeprom[2][0] == 4, "p33 untouched");
+    check(logged("p17 (byte 16) reads 200, outside its documented 10..100"), "the offending byte is named");
+    check(!g_boiler.service_mode, "boiler left locked");
     delete d;
   }
 

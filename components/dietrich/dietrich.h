@@ -31,7 +31,17 @@ enum DietrichRequest : uint8_t {
   // the write path; see start_txn_() for the sequence these make up
   DIETRICH_REQ_SERVICE_ON,
   DIETRICH_REQ_SERVICE_OFF,
-  DIETRICH_REQ_WRITE_BLOCK,
+  // EEPROM block writes, one per parameter block. Contiguous like the PARAM
+  // entries and immediately below them, so the block is (req - WRITE0) and the
+  // range test is WRITE0 <= req < PARAM0.
+  DIETRICH_REQ_WRITE0,
+  DIETRICH_REQ_WRITE1,
+  DIETRICH_REQ_WRITE2,
+  DIETRICH_REQ_WRITE3,
+  DIETRICH_REQ_WRITE4,
+  DIETRICH_REQ_WRITE5,
+  DIETRICH_REQ_WRITE6,
+  DIETRICH_REQ_WRITE7,
   DIETRICH_REQ_PARAM0,
   DIETRICH_REQ_PARAM1,
   DIETRICH_REQ_PARAM2,
@@ -51,6 +61,8 @@ static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
 static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
 // STX + 6 header bytes + 16 data bytes + CRC16 + ETX
 static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
+// A full parameter write is unlock + 8 reads + 8 writes + 8 verify reads + re-lock
+static const size_t DIETRICH_QUEUE_LEN = 32;
 
 enum DietrichState : uint8_t {
   DIETRICH_IDLE = 0,
@@ -231,14 +243,25 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   bool want_params_() const;
 
   // write path
-  bool stage_txn_(DietrichTxn txn, uint8_t block, uint8_t offset, uint8_t value, const char *what);
+  bool stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_count, uint8_t byte_offset, uint8_t value,
+                  const char *what);
   void start_txn_();
   void finish_txn_();
   // jump to the re-lock, which start_txn_() always leaves last in the queue
   void skip_to_relock_();
-  // fills tx_buf_ from params_ plus the staged edit; only valid once the
-  // transaction's own read of that block has landed
+  // Runs once, at the first write of a transaction: checks that every block was
+  // read back cleanly, sanity-checks the image against the documented ranges and
+  // applies the staged edit. False means the transaction has already been failed
+  // or skipped and nothing should be written.
+  bool begin_write_phase_();
+  // true when every documented parameter inside the blocks about to be written
+  // reads inside its range - i.e. the image is plausibly a real one
+  bool image_is_sane_() const;
+  // fills tx_buf_ from txn_image_; only valid after begin_write_phase_()
   void build_write_frame_(uint8_t block);
+  static bool is_write_req_(DietrichRequest req);
+  // EEPROM block index for a PARAM or WRITE request
+  static uint8_t block_of_(DietrichRequest req);
 
   void command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const;
   // number of header bytes before the data block in a response frame
@@ -282,8 +305,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   DietrichVariant variant_{DIETRICH_VARIANT_MCR3};
 
   DietrichState state_machine_{DIETRICH_IDLE};
-  // long enough for the 8 parameter-block requests
-  DietrichRequest queue_[DIETRICH_PARAM_BLOCKS]{};
+  // long enough for a full parameter write; see DIETRICH_QUEUE_LEN
+  DietrichRequest queue_[DIETRICH_QUEUE_LEN]{};
   uint8_t queue_len_{0};
   uint8_t queue_pos_{0};
 
@@ -305,18 +328,24 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
 
   // staged by the public write methods, consumed by start_txn_()
   DietrichTxn pending_txn_{DIETRICH_TXN_NONE};
-  uint8_t pending_block_{DIETRICH_PARAM_FIRST_BLOCK};
-  uint8_t pending_offset_{0};  // offset within that block, 0..15
+  uint8_t pending_first_block_{DIETRICH_PARAM_FIRST_BLOCK};
+  uint8_t pending_block_count_{1};
+  uint8_t pending_byte_{0};  // offset into the 128 byte parameter block
   uint8_t pending_value_{0};
 
   // live for as long as a transaction is on the bus
   bool txn_active_{false};
   bool txn_failed_{false};
-  bool txn_read_ok_{false};  // the transaction's own read of txn_block_ landed
-  bool txn_wrote_{false};    // the write step was ACKed, so a verify is meaningful
+  bool txn_wrote_{false};  // at least one write was ACKed, so a verify is meaningful
   DietrichTxn txn_kind_{DIETRICH_TXN_NONE};
-  uint8_t txn_block_{DIETRICH_PARAM_FIRST_BLOCK};
-  // the frame actually sent, kept intact so the verify read can be compared to it
+  uint8_t txn_first_block_{DIETRICH_PARAM_FIRST_BLOCK};
+  uint8_t txn_block_count_{1};
+  // bit n set once block n has been read back whole inside this transaction
+  uint8_t txn_blocks_read_{0};
+  // the image this transaction intends the boiler to end up holding: the blocks
+  // it read for itself, plus the one staged edit. The verify reads are compared
+  // against this.
+  uint8_t txn_image_[DIETRICH_PARAM_BYTES]{};
   uint8_t tx_buf_[DIETRICH_WRITE_FRAME_LEN]{};
 
   // the boot service-mode check runs on the first long-enough sample only
