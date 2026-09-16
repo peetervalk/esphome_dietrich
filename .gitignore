@@ -4,3 +4,7 @@
 /.esphome/
 /secrets.yaml
 *.pyc
+
+# built by tests/run.sh
+/tests/test_write
+/tests/test_write.exe

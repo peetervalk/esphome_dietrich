@@ -48,9 +48,21 @@ uart:
   rx_pin: GPIO16
 
 dietrich:
+  # needed only so the bring-up buttons at the bottom can reach the component
+  id: boiler
   uart_id: uart_bus
   update_interval: 15s
   variant: pcu05_p3
+
+  # Writing to the boiler's EEPROM is off by default and has to be turned on
+  # deliberately. With it off, every write method refuses and says so in the
+  # log, and the component never unlocks service mode. Read
+  # mapping/pcu05_p3_protocol.md before turning it on: the component will not
+  # write the gas/air settings or the controller-protection limits at all,
+  # because a bad write there is a combustion-safety problem rather than a
+  # comfort one.
+  
+  # allow_writes: true
 
   # Status registers. The *_text sensors decode the numeric code into the same
   # wording Recom shows, so no template lambdas are needed.
@@ -250,3 +262,55 @@ sensor:
 
   - platform: uptime
     name: "Boiler Uptime"
+
+# ---------------------------------------------------------------------------
+# Bring-up buttons for the write path
+#
+# Commented out along with `allow_writes` above - uncomment both together. Work
+# down the list in order: each step is what makes the next one safe to try.
+#
+# The lambda is compiled into the firmware, so Home Assistant only ever sees a
+# button and sends "press". No frame, byte or parameter value crosses the HA
+# boundary: the component builds the frame itself, reads the block it is about
+# to modify inside the same transaction, clamps the value to the documented
+# range, and re-locks service mode whatever happens. Watch the ESPHome log
+# while pressing these - that is where the result is reported.
+# ---------------------------------------------------------------------------
+# button:
+#   # 1. Unlock service mode and immediately re-lock it, writing nothing at all.
+#   #    Sample byte 62 - the `service_mode` sensor - reports the state, so this
+#   #    exercises the unlock path at no risk. Expect two ACKs in the log and
+#   #    "service mode test finished, nothing was written".
+#   - platform: template
+#     name: "Boiler service mode self-test"
+#     entity_category: diagnostic
+#     on_press:
+#       - lambda: 'id(boiler).test_service_mode();'
+#
+#   # 2. Read EEPROM block 0x16 and write it straight back, byte for byte. This
+#   #    is the first frame that actually writes, and it changes nothing - the
+#   #    cheapest possible way to find out what an accepted (or a rejected)
+#   #    write looks like on this bus, which is the one thing the protocol notes
+#   #    could not establish from Recom's code alone. Expect "identity write of
+#   #    block 0x16 verified".
+#   - platform: template
+#     name: "Boiler identity write block 0x16"
+#     entity_category: diagnostic
+#     on_press:
+#       - lambda: 'id(boiler).write_block_unchanged(0x16);'
+#
+#   # 3. The real thing: p33, the DHW cut-in hysteresis below the tank setpoint.
+#   #    With p2 = 56 and p33 = 4 the tank reheats at 52 C; p33 = 6 moves that
+#   #    to 50 C, so the burner runs less often for longer. The value is clamped
+#   #    to the documented 2..15, and a write is skipped entirely when the
+#   #    boiler already holds that value - so pressing this twice costs one
+#   #    EEPROM cycle, not two.
+#   - platform: template
+#     name: "Boiler set DHW hysteresis to 6"
+#     entity_category: config
+#     on_press:
+#       - lambda: 'id(boiler).write_param(33, 6);'
+#
+#   # Any parameter on the component's writable list works the same way, e.g.
+#   # the tank charge temperature (p2, 40..65):
+#   #   - lambda: 'id(boiler).write_param(2, 55);'

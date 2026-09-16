@@ -49,6 +49,16 @@ static const uint8_t CMD_PARAM_REMEHA[8][10] = {
     {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1B, 0xD9, 0x00, 0x03},  // bytes 112..127
 };
 
+// Service mode, from RemehaBoilerController.EnableServiceMode: a bare 10 byte
+// frame with no payload. COMMAND 0x08 (CODE_SERVICE_START) unlocks writing and
+// 0x1F (CODE_SERVICE_STOP) re-locks it, both with EXTCMD 0x0C (CODE_SERVICE).
+// No service code is sent - the 0012 PIN Recom asks for is an application-level
+// gate only, and nothing in the write path touches SERVICE_CODE (0x37).
+// Addressed to the PCU at 0x01, which is what Recom does for the write path;
+// reads get away with 0x00 but there is no reason to risk it here.
+static const uint8_t CMD_SERVICE_ON_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x08, 0x0C, 0xAE, 0xCE, 0x03};
+static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x1F, 0x0C, 0xA1, 0x3E, 0x03};
+
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
 static const uint8_t CMD_COUNTER1_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x01, 0x40, 0x03};
@@ -61,6 +71,9 @@ static const size_t REMEHA_MIN_FRAME = 10;
 
 // give up on a response after this long
 static const uint32_t RESPONSE_TIMEOUT_MS = 600;
+// A write gets longer: Recom allows a full second for the ACK, and an EEPROM
+// program cycle plausibly delays it past the 600 ms a read is given.
+static const uint32_t WRITE_TIMEOUT_MS = 1000;
 // a gap this long after the last byte ends the frame
 static const uint32_t RX_QUIET_MS = 40;
 // settle time between two requests of the same cycle
@@ -73,6 +86,45 @@ struct CodeText {
   uint16_t code;
   const char *text;
 };
+
+// The parameters this component is willing to write, with the min/max from the
+// PCU-05 P3 map. Recom clamps every value to these before sending it
+// (ValidateDataModel) and so does write_param(): a value outside the range is
+// not an error, it is pulled to the nearest end.
+//
+// Deliberately absent, and not to be added casually: the gas/air settings
+// (p17-p21, p77, p78) and the controller-protection limits (p55-p57). A bad
+// write there is a combustion-safety problem rather than a comfort one. Also
+// absent are the parameters stored as two's complement (p27, p30, p61, p86,
+// p106), which would need a signed API.
+//
+// Adding a parameter is a one-line change; `offset` is the "Byte" column of the
+// full parameter table in mapping/pcu05_p3_protocol.md.
+struct ParamLimit {
+  uint8_t param;   // the pNN number, as the manual and the map number it
+  uint8_t offset;  // byte offset into the 128 byte parameter block
+  uint8_t min;
+  uint8_t max;
+};
+
+static const ParamLimit PARAM_LIMITS[] = {
+    {1, 0, 20, 90},     // T flow set point - max flow temperature during CH
+    {2, 1, 40, 65},     // DHW set point - the tank charge temperature
+    {3, 2, 0, 3},       // Boiler controls - CH/DHW on/off
+    {4, 3, 0, 2},       // Comfort DHW - always on / always off / controller
+    {5, 4, 0, 99},      // Pump post run CH, minutes, 99 = continuous
+    {23, 22, 20, 90},   // Max flow system
+    {25, 24, 0, 30},    // Footpoint T outside (heating curve)
+    {26, 25, 0, 90},    // Footpoint T flow (heating curve)
+    {31, 30, 0, 2},     // Anti legionella
+    {32, 31, 0, 25},    // Setpoint raise while charging the calorifier
+    {33, 32, 2, 15},    // Hysteresis calorifier - DHW cut-in below tank setpoint
+    {73, 72, 1, 10},    // Hysteresis CH
+    {85, 84, 0, 20},    // Hysteresis warming up (DHW comfort)
+    {88, 87, 1, 10},    // Hysteresis DHW - combi/flow-through only
+    {105, 104, 0, 10},  // Offset calorifier - switch-off offset, tank sensor
+};
+static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMITS[0]);
 
 static const CodeText STATUS_CODES[] = {
     {0, "0:Standby"},
@@ -230,27 +282,30 @@ std::string Dietrich::hex_str_(const uint8_t *data, size_t len) {
   return s;
 }
 
-// CRC16 (poly 0xA001, init 0xFFFF) over bytes 1..n-4; the frame ends with CRC (LSB, MSB) and 0x03
+// CRC16, poly 0xA001, init 0xFFFF, over data[from .. to-1]
+uint16_t Dietrich::crc16_(const uint8_t *data, size_t from, size_t to) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = from; i < to; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if ((crc & 0x0001) != 0) {
+        crc >>= 1;
+        crc ^= 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+// The CRC covers bytes 1..n-4; the frame ends with CRC (LSB, MSB) and 0x03
 bool Dietrich::is_valid_crc_(const uint8_t *response, size_t n) {
   if (n < 5)
     return false;
 
-  uint16_t expected_crc = response[n - 3] | (response[n - 2] << 8);
-
-  uint16_t calculated_crc = 0xFFFF;
-  for (size_t i = 1; i < n - 3; i++) {
-    calculated_crc ^= response[i];
-    for (uint8_t j = 0; j < 8; j++) {
-      if ((calculated_crc & 0x0001) != 0) {
-        calculated_crc >>= 1;
-        calculated_crc ^= 0xA001;
-      } else {
-        calculated_crc >>= 1;
-      }
-    }
-  }
-
-  return expected_crc == calculated_crc;
+  const uint16_t expected_crc = response[n - 3] | (response[n - 2] << 8);
+  return expected_crc == crc16_(response, 1, n - 3);
 }
 
 // The checks Recom's RemehaReceiver.ValidateResponse makes, plus the CRC (see
@@ -394,6 +449,19 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
 
   const bool calenta = this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5;
   switch (req) {
+    case DIETRICH_REQ_SERVICE_ON:
+      *cmd = CMD_SERVICE_ON_REMEHA;
+      *len = sizeof(CMD_SERVICE_ON_REMEHA);
+      break;
+    case DIETRICH_REQ_SERVICE_OFF:
+      *cmd = CMD_SERVICE_OFF_REMEHA;
+      *len = sizeof(CMD_SERVICE_OFF_REMEHA);
+      break;
+    case DIETRICH_REQ_WRITE_BLOCK:
+      // built per transaction by build_write_frame_(), just before it is sent
+      *cmd = this->tx_buf_;
+      *len = DIETRICH_WRITE_FRAME_LEN;
+      break;
     case DIETRICH_REQ_COUNTER1:
       *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
       *len = calenta ? sizeof(CMD_COUNTER1_CALENTA) : sizeof(CMD_COUNTER1_MCR3);
@@ -495,6 +563,19 @@ void Dietrich::decode_sample_() {
   this->pub_s8_(this->dhw_setpoint_hmi_sensor_, 61);
   this->pub_u8_(this->service_mode_sensor_, 62, 1.0f);
   this->pub_u8_(this->rs232_mode_sensor_, 63, 1.0f);
+
+  // A reset partway through a write transaction leaves service mode on
+  // indefinitely, so check once at boot and re-lock if it is. Byte 62 reports the
+  // current state. Gated on allow_writes: re-locking a board that somebody else
+  // deliberately unlocked is not this component's business otherwise.
+  if (!this->seen_sample_ && this->have_(62, 1)) {
+    this->seen_sample_ = true;
+    if (this->allow_writes_ && this->d_(62) != 0) {
+      ESP_LOGW(TAG, "boiler is in service mode at boot (sample byte 62 = %u), re-locking",
+               static_cast<unsigned>(this->d_(62)));
+      this->stage_txn_(DIETRICH_TXN_RELOCK, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, "boot re-lock");
+    }
+  }
 }
 
 void Dietrich::decode_counter1_() {
@@ -572,30 +653,240 @@ void Dietrich::decode_params_() {
   this->pub_param_(this->param_dhw_hysteresis_sensor_, 32, 1.0f);     // p33
 }
 
-void Dietrich::handle_response_() {
+uint32_t Dietrich::timeout_for_(DietrichRequest req) {
+  return req == DIETRICH_REQ_WRITE_BLOCK ? WRITE_TIMEOUT_MS : RESPONSE_TIMEOUT_MS;
+}
+
+// 02 | FE | 01 | 05 | 18 | 11 | blk | 16 data bytes | CRClo CRChi | 03
+//
+// The payload is the block as the boiler just reported it, with the staged edit
+// applied on top. Fifteen of those sixteen bytes are unrelated parameters going
+// back verbatim, which is why the read has to belong to this transaction rather
+// than to the hourly sweep.
+void Dietrich::build_write_frame_(uint8_t block) {
+  const size_t base = (static_cast<size_t>(block) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
+
+  this->tx_buf_[0] = 0x02;
+  this->tx_buf_[1] = 0xFE;  // sender: the PC
+  this->tx_buf_[2] = 0x01;  // recipient: the PCU
+  this->tx_buf_[3] = 0x05;  // request
+  this->tx_buf_[4] = static_cast<uint8_t>(DIETRICH_WRITE_FRAME_LEN - 2);
+  this->tx_buf_[5] = 0x11;  // WRITE_EPROM_BLOCK
+  this->tx_buf_[6] = block;
+
+  for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
+    this->tx_buf_[7 + i] = this->params_[base + i];
+
+  // an identity write sends the block back untouched; only a parameter write edits
+  if (this->txn_kind_ == DIETRICH_TXN_PARAM)
+    this->tx_buf_[7 + this->pending_offset_] = this->pending_value_;
+
+  const uint16_t crc = crc16_(this->tx_buf_, 1, DIETRICH_WRITE_FRAME_LEN - 3);
+  this->tx_buf_[DIETRICH_WRITE_FRAME_LEN - 3] = static_cast<uint8_t>(crc & 0xFF);
+  this->tx_buf_[DIETRICH_WRITE_FRAME_LEN - 2] = static_cast<uint8_t>(crc >> 8);
+  this->tx_buf_[DIETRICH_WRITE_FRAME_LEN - 1] = 0x03;
+}
+
+bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t block, uint8_t offset, uint8_t value, const char *what) {
+  if (!this->allow_writes_) {
+    ESP_LOGW(TAG, "%s refused: allow_writes is not set on the dietrich component", what);
+    return false;
+  }
+  // The 128 byte parameter map belongs to the PCU-05 P3 parameter set. On another
+  // board the same offset is a different parameter, so refuse outright rather
+  // than write something unknown.
+  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
+    ESP_LOGW(TAG, "%s refused: writing is only supported on variant pcu05_p3", what);
+    return false;
+  }
+  if (this->pending_txn_ != DIETRICH_TXN_NONE || this->txn_active_) {
+    ESP_LOGW(TAG, "%s refused: another write is already in progress", what);
+    return false;
+  }
+
+  this->pending_txn_ = txn;
+  this->pending_block_ = block;
+  this->pending_offset_ = offset;
+  this->pending_value_ = value;
+  ESP_LOGI(TAG, "%s queued", what);
+  return true;
+}
+
+bool Dietrich::test_service_mode() { return this->stage_txn_(DIETRICH_TXN_SERVICE_TEST, 0, 0, 0, "service mode test"); }
+
+bool Dietrich::write_block_unchanged(uint8_t block) {
+  char what[48];
+  snprintf(what, sizeof(what), "identity write of block 0x%02X", static_cast<unsigned>(block));
+  if (block < DIETRICH_PARAM_FIRST_BLOCK || block > DIETRICH_PARAM_LAST_BLOCK) {
+    ESP_LOGW(TAG, "%s refused: outside the parameter block 0x%02X..0x%02X", what,
+             static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK), static_cast<unsigned>(DIETRICH_PARAM_LAST_BLOCK));
+    return false;
+  }
+  return this->stage_txn_(DIETRICH_TXN_IDENTITY, block, 0, 0, what);
+}
+
+bool Dietrich::write_param(uint8_t param, uint8_t value) {
+  const ParamLimit *lim = nullptr;
+  for (size_t i = 0; i < PARAM_LIMITS_LEN; i++) {
+    if (PARAM_LIMITS[i].param == param) {
+      lim = &PARAM_LIMITS[i];
+      break;
+    }
+  }
+  if (lim == nullptr) {
+    ESP_LOGW(TAG, "write of p%u refused: not one of the parameters this component will write",
+             static_cast<unsigned>(param));
+    return false;
+  }
+
+  uint8_t clamped = value;
+  if (clamped < lim->min)
+    clamped = lim->min;
+  if (clamped > lim->max)
+    clamped = lim->max;
+  if (clamped != value) {
+    ESP_LOGW(TAG, "p%u: %u is outside %u..%u, clamped to %u", static_cast<unsigned>(param),
+             static_cast<unsigned>(value), static_cast<unsigned>(lim->min), static_cast<unsigned>(lim->max),
+             static_cast<unsigned>(clamped));
+  }
+
+  char what[48];
+  snprintf(what, sizeof(what), "write of p%u = %u", static_cast<unsigned>(param), static_cast<unsigned>(clamped));
+  const uint8_t block = static_cast<uint8_t>(DIETRICH_PARAM_FIRST_BLOCK + lim->offset / DIETRICH_PARAM_BLOCK_SIZE);
+  const uint8_t offset = static_cast<uint8_t>(lim->offset % DIETRICH_PARAM_BLOCK_SIZE);
+  return this->stage_txn_(DIETRICH_TXN_PARAM, block, offset, clamped, what);
+}
+
+void Dietrich::start_txn_() {
+  this->txn_kind_ = this->pending_txn_;
+  this->txn_block_ = this->pending_block_;
+  this->pending_txn_ = DIETRICH_TXN_NONE;
+  this->txn_active_ = true;
+  this->txn_failed_ = false;
+  this->txn_read_ok_ = false;
+  this->txn_wrote_ = false;
+  this->queue_pos_ = 0;
+
+  const DietrichRequest block_read =
+      static_cast<DietrichRequest>(DIETRICH_REQ_PARAM0 + (this->txn_block_ - DIETRICH_PARAM_FIRST_BLOCK));
+
+  uint8_t n = 0;
+  switch (this->txn_kind_) {
+    case DIETRICH_TXN_RELOCK:
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      break;
+    case DIETRICH_TXN_SERVICE_TEST:
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      break;
+    default:
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_ON;
+      this->queue_[n++] = block_read;  // fresh copy to modify
+      this->queue_[n++] = DIETRICH_REQ_WRITE_BLOCK;
+      this->queue_[n++] = block_read;  // read back to verify
+      this->queue_[n++] = DIETRICH_REQ_SERVICE_OFF;
+      break;
+  }
+  // the re-lock has to be last: a failed step jumps straight to queue_len_ - 1
+  this->queue_len_ = n;
+
+  this->next_send_time_ = millis();
+  this->state_machine_ = DIETRICH_SEND;
+}
+
+void Dietrich::finish_txn_() {
+  const char *kind = "write";
+  switch (this->txn_kind_) {
+    case DIETRICH_TXN_SERVICE_TEST:
+      kind = "service mode test";
+      break;
+    case DIETRICH_TXN_IDENTITY:
+      kind = "identity write";
+      break;
+    case DIETRICH_TXN_PARAM:
+      kind = "parameter write";
+      break;
+    case DIETRICH_TXN_RELOCK:
+      kind = "re-lock";
+      break;
+    default:
+      break;
+  }
+
+  if (this->txn_failed_) {
+    ESP_LOGE(TAG, "%s failed; service mode was re-locked, nothing was retried", kind);
+  } else if (this->txn_wrote_) {
+    // params_ now holds the verify read, tx_buf_ holds what actually went out
+    const size_t base =
+        (static_cast<size_t>(this->txn_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
+    bool same = true;
+    for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++) {
+      if (this->params_[base + i] != this->tx_buf_[7 + i])
+        same = false;
+    }
+    if (same) {
+      ESP_LOGI(TAG, "%s of block 0x%02X verified", kind, static_cast<unsigned>(this->txn_block_));
+    } else {
+      ESP_LOGE(TAG, "%s of block 0x%02X was ACKed but reads back different: sent %s, got %s", kind,
+               static_cast<unsigned>(this->txn_block_), hex_str_(this->tx_buf_ + 7, DIETRICH_PARAM_BLOCK_SIZE).c_str(),
+               hex_str_(this->params_ + base, DIETRICH_PARAM_BLOCK_SIZE).c_str());
+    }
+  } else {
+    ESP_LOGI(TAG, "%s finished, nothing was written", kind);
+  }
+
+  this->txn_active_ = false;
+  this->txn_failed_ = false;
+  this->txn_read_ok_ = false;
+  this->txn_wrote_ = false;
+  this->txn_kind_ = DIETRICH_TXN_NONE;
+}
+
+bool Dietrich::handle_response_() {
   const DietrichRequest req = this->queue_[this->queue_pos_];
   char param_what[16];
   const char *what;
   if (req >= DIETRICH_REQ_PARAM0) {
     snprintf(param_what, sizeof(param_what), "param 0x%02X",
-             static_cast<unsigned>(0x14 + (req - DIETRICH_REQ_PARAM0)));
+             static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK + (req - DIETRICH_REQ_PARAM0)));
     what = param_what;
   } else {
-    what = req == DIETRICH_REQ_SAMPLE ? "sample" : (req == DIETRICH_REQ_COUNTER1 ? "counter1" : "counter2");
+    switch (req) {
+      case DIETRICH_REQ_COUNTER1:
+        what = "counter1";
+        break;
+      case DIETRICH_REQ_COUNTER2:
+        what = "counter2";
+        break;
+      case DIETRICH_REQ_SERVICE_ON:
+        what = "service mode on";
+        break;
+      case DIETRICH_REQ_SERVICE_OFF:
+        what = "service mode off";
+        break;
+      case DIETRICH_REQ_WRITE_BLOCK:
+        what = "eeprom write";
+        break;
+      default:
+        what = "sample";
+        break;
+    }
   }
 
   ESP_LOGD(TAG, "%s data (%u bytes): %s", what, static_cast<unsigned>(this->rx_len_),
            hex_str_(this->rx_buf_, this->rx_len_).c_str());
 
   if (this->rx_len_ == 0) {
+    // Recom treats a timed-out write as a success; see the note in
+    // mapping/pcu05_p3_protocol.md. No response is a failure here.
     ESP_LOGW(TAG, "no response to %s request", what);
-    return;
+    return false;
   }
 
   const char *err = this->response_error_();
   if (err != nullptr) {
     ESP_LOGW(TAG, "%s response rejected: %s", what, err);
-    return;
+    return false;
   }
 
   const size_t overhead = this->header_len_() + this->trailer_len_();
@@ -609,15 +900,28 @@ void Dietrich::handle_response_() {
     if (this->data_len_ != DIETRICH_PARAM_BLOCK_SIZE) {
       ESP_LOGW(TAG, "%s returned %u data bytes, expected %u", what, static_cast<unsigned>(this->data_len_),
                static_cast<unsigned>(DIETRICH_PARAM_BLOCK_SIZE));
-      return;
+      return false;
     }
     for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
       this->params_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
     this->param_blocks_seen_ |= static_cast<uint8_t>(1u << blk);
+    // a whole block, for the block this transaction is about to write
+    if (this->txn_active_ && this->txn_block_ == DIETRICH_PARAM_FIRST_BLOCK + blk)
+      this->txn_read_ok_ = true;
     // publish only once the whole sweep is in, so the values are consistent
     if (this->param_blocks_seen_ == 0xFF)
       this->decode_params_();
-    return;
+    return true;
+  }
+
+  if (req == DIETRICH_REQ_WRITE_BLOCK) {
+    // An ACK is an ordinary response frame carrying no data, and
+    // response_error_() has already checked the type byte, the swapped
+    // addresses and the echoed COMMAND/EXT_COMMAND - so there is nothing left
+    // to decode, and getting this far is the acknowledgement.
+    ESP_LOGI(TAG, "block 0x%02X write ACKed", static_cast<unsigned>(this->txn_block_));
+    this->txn_wrote_ = true;
+    return true;
   }
 
   switch (req) {
@@ -631,8 +935,10 @@ void Dietrich::handle_response_() {
       this->decode_counter2_();
       break;
     default:
+      // service mode on/off carry no data; the validated ACK is the whole result
       break;
   }
+  return true;
 }
 
 void Dietrich::send_request_() {
@@ -640,13 +946,44 @@ void Dietrich::send_request_() {
   if (static_cast<int32_t>(millis() - this->next_send_time_) < 0)
     return;
 
+  const DietrichRequest req = this->queue_[this->queue_pos_];
+
+  if (req == DIETRICH_REQ_WRITE_BLOCK) {
+    // Nothing is written unless this transaction's own read of the block came
+    // back whole. Without it, fifteen unrelated parameters would go to EEPROM as
+    // whatever happened to be sitting in params_.
+    if (!this->txn_read_ok_) {
+      ESP_LOGE(TAG, "refusing to write block 0x%02X: its read did not land",
+               static_cast<unsigned>(this->txn_block_));
+      this->txn_failed_ = true;
+      this->skip_to_relock_();
+      return;
+    }
+    // A parameter that already holds the wanted value is not worth an EEPROM
+    // cycle, and EEPROM endurance is finite. The check waits until here because
+    // it needs the block this transaction just read, not a stale copy.
+    if (this->txn_kind_ == DIETRICH_TXN_PARAM) {
+      const size_t off =
+          (static_cast<size_t>(this->txn_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE +
+          this->pending_offset_;
+      if (this->params_[off] == this->pending_value_) {
+        ESP_LOGI(TAG, "parameter already reads %u, skipping the write", static_cast<unsigned>(this->pending_value_));
+        this->skip_to_relock_();
+        return;
+      }
+    }
+    this->build_write_frame_(this->txn_block_);
+  }
+
   // drop anything left over from a previous exchange
   while (this->available())
     this->read();
 
   const uint8_t *cmd = nullptr;
   size_t len = 0;
-  this->command_for_(this->queue_[this->queue_pos_], &cmd, &len);
+  this->command_for_(req, &cmd, &len);
+  if (req == DIETRICH_REQ_WRITE_BLOCK)
+    ESP_LOGI(TAG, "writing block 0x%02X: %s", static_cast<unsigned>(this->txn_block_), hex_str_(cmd, len).c_str());
   this->write_array(cmd, len);
 
   this->rx_len_ = 0;
@@ -668,20 +1005,42 @@ void Dietrich::poll_response_() {
     done = true;  // buffer full, nothing more will fit
   } else if (this->rx_len_ > 0 && now - this->last_byte_time_ >= RX_QUIET_MS) {
     done = true;  // the boiler stopped talking
-  } else if (now - this->request_time_ >= RESPONSE_TIMEOUT_MS) {
+  } else if (now - this->request_time_ >= timeout_for_(this->queue_[this->queue_pos_])) {
     done = true;  // nothing came back at all
   }
 
   if (!done)
     return;
 
-  this->handle_response_();
+  const bool ok = this->handle_response_();
+  if (this->txn_active_ && !ok)
+    this->txn_failed_ = true;
   this->advance_();
 }
 
+// Jump to the re-lock, which start_txn_() always puts last in the queue. Used
+// both for a step that failed and for a write that turned out to be unnecessary.
+void Dietrich::skip_to_relock_() {
+  if (this->queue_len_ > 0)
+    this->queue_pos_ = static_cast<uint8_t>(this->queue_len_ - 1);
+  this->next_send_time_ = millis() + INTER_REQUEST_MS;
+  this->state_machine_ = DIETRICH_SEND;
+}
+
 void Dietrich::advance_() {
+  // A failed step in a write transaction goes straight to the re-lock instead of
+  // carrying on. Recom leaves service mode on when a write fails - it re-locks
+  // only in the success branch, with no try/finally - and that is not a bug
+  // worth copying. See mapping/pcu05_p3_protocol.md.
+  if (this->txn_active_ && this->txn_failed_ && this->queue_pos_ + 1 < this->queue_len_) {
+    this->skip_to_relock_();
+    return;
+  }
+
   this->queue_pos_++;
   if (this->queue_pos_ >= this->queue_len_) {
+    if (this->txn_active_)
+      this->finish_txn_();
     this->state_machine_ = DIETRICH_IDLE;
     return;
   }
@@ -699,6 +1058,11 @@ void Dietrich::loop() {
       break;
     case DIETRICH_IDLE:
     default:
+      // A write staged from a lambda starts as soon as the bus is free rather
+      // than waiting out the rest of the poll interval. Starting only from IDLE
+      // is what keeps it from ever landing inside an exchange in flight.
+      if (this->pending_txn_ != DIETRICH_TXN_NONE)
+        this->start_txn_();
       break;
   }
 }
@@ -706,6 +1070,11 @@ void Dietrich::loop() {
 void Dietrich::update() {
   if (this->state_machine_ != DIETRICH_IDLE) {
     ESP_LOGW(TAG, "previous poll still running, skipping this interval");
+    return;
+  }
+
+  if (this->pending_txn_ != DIETRICH_TXN_NONE) {
+    this->start_txn_();
     return;
   }
 
@@ -745,6 +1114,7 @@ void Dietrich::dump_config() {
 
   ESP_LOGCONFIG(TAG, "Dietrich boiler:");
   ESP_LOGCONFIG(TAG, "  Variant: %s", variant);
+  ESP_LOGCONFIG(TAG, "  Writing: %s", this->allow_writes_ ? "enabled" : "disabled");
   if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->hydro_pressure_sensor_ != nullptr) {
     ESP_LOGW(TAG, "  hydro_pressure is not part of the PCU-05 P3 map - verify it against the boiler display");
   }

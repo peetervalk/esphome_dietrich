@@ -231,9 +231,44 @@ revert 15 unrelated parameters.
 - EEPROM endurance is finite. This is not somewhere to write on a schedule.
 - What a *rejected* write looks like is still unknown — byte `[3]` set to something
   other than `0x06`, or silence. The safe way to find out is to write a block back
-  unchanged and watch what comes home.
-- Write support does not exist in this component today; this document is the
-  specification for adding it, not a description of what it does.
+  unchanged and watch what comes home, which is what
+  `Dietrich::write_block_unchanged()` exists for.
+
+### What the component implements
+
+Write support now exists in `components/dietrich/dietrich.cpp`, built to this
+specification. It is gated behind `allow_writes` in the YAML and behind
+`variant: pcu05_p3` — the 128 byte parameter map belongs to that parameter
+set, so the same byte offset means something else on another board.
+
+A write is a five step transaction on the component's existing request queue:
+
+```
+CODE_SERVICE_START -> READ_EPROM_BLOCK -> WRITE_EPROM_BLOCK -> READ_EPROM_BLOCK -> CODE_SERVICE_STOP
+```
+
+The block is read *inside* the transaction, because fifteen of the sixteen bytes
+go back to the boiler verbatim and a copy from the hourly parameter sweep could
+be stale. Neither Recom bug above is reproduced: any failed step — including a
+failure of the unlock itself — skips straight to the re-lock instead of carrying
+on, a missing response is a failure rather than a success, and a board found in
+service mode at boot (sample byte 62) is re-locked. Values are clamped to the
+ranges in the table below, the gas/air and controller-protection parameters are
+not writable at all, and a write is skipped outright when the freshly read block
+already holds the wanted value.
+
+`tests/` drives all of that against a simulated PCU-05 P3 on a PC, with no
+hardware and no ESPHome involved; `./tests/run.sh` builds and runs it.
+
+Three entry points are callable from a YAML lambda, which is how a button in
+Home Assistant reaches them — see the commented-out section at the bottom of
+`dietrich_pcu05_p3_en.yaml`:
+
+| Method | What it does |
+|---|---|
+| `test_service_mode()` | unlock and immediately re-lock, writing nothing |
+| `write_block_unchanged(blk)` | read a block and write it back byte-for-byte |
+| `write_param(p, v)` | read-modify-write one parameter, clamped to its range |
 
 ## Hysteresis parameters
 

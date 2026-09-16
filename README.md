@@ -51,6 +51,54 @@ protocols. This component implements two of them, across three variants:
 |---|---|---|---|
 | `mcr3` (default) | Remeha (`protocol.nr` 1) | CRC16, 7-byte response header | MCR3, PCU-0x |
 | `pcu05_p3` | Remeha (`protocol.nr` 1) | same frames as `mcr3` | PCU-05, parameter set P3 |
+
+### Writing parameters (`pcu05_p3` only)
+
+The component can also write the boiler's stored parameters back to EEPROM. It
+stays off unless you ask for it:
+
+```yaml
+dietrich:
+  id: boiler
+  variant: pcu05_p3
+  allow_writes: true
+```
+
+There is no writable entity yet. The write path is reached from a YAML lambda,
+so Home Assistant only ever sees an ordinary button and sends “press” — no
+frame, byte or parameter value crosses the HA boundary, and the component builds
+and validates everything itself:
+
+```yaml
+button:
+  - platform: template
+    name: "Boiler set DHW hysteresis to 6"
+    on_press:
+      - lambda: 'id(boiler).write_param(33, 6);'
+```
+
+`write_param(p, v)` takes the `pNN` number from the parameter table in
+[mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md). Two further entry
+points exist for bringing this up on a boiler for the first time, and
+[dietrich_pcu05_p3_en.yaml](dietrich_pcu05_p3_en.yaml) carries all three ready
+to uncomment, in the order they are worth trying:
+
+| Method | What it does |
+|---|---|
+| `test_service_mode()` | unlock service mode and re-lock it, writing nothing |
+| `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
+| `write_param(p, v)` | read-modify-write one parameter |
+
+Each write is a single transaction that unlocks service mode, re-reads the block
+it is about to modify, writes it, reads it back to verify and re-locks — and
+that re-lock happens whether or not the write succeeded. Values are clamped to
+the documented range; a value the boiler already holds is not written at all,
+because EEPROM endurance is finite; and the gas/air settings (p17-p21, p77, p78)
+and the controller-protection limits (p55-p57) are refused outright, because a
+bad write there is a combustion-safety problem rather than a comfort one.
+
+The refusal paths are covered by tests that run on a PC against a simulated
+board — see [tests/](tests/).
 | `calenta_v1_p5` | Avanta (`protocol.nr` 2) | XOR checksum, 6-byte header | Calenta, MCX Plus, Avanta V1_P5 |
 
 `pcu05_p3` sends the same requests as `mcr3` - the PCU-05 sample block is a

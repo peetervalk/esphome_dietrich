@@ -21,11 +21,17 @@ enum DietrichVariant : uint8_t {
 // One request/response exchange with the boiler. The PARAM entries read the
 // 128 byte parameter block out of EEPROM blocks 0x14..0x1B, 16 bytes at a time;
 // see mapping/pcu05_p3_protocol.md. They must stay last and contiguous - the
-// block index is recovered as (req - DIETRICH_REQ_PARAM0).
+// block index is recovered as (req - DIETRICH_REQ_PARAM0), and every other kind
+// is identified by sorting below DIETRICH_REQ_PARAM0. New request kinds
+// therefore go above it, never after it.
 enum DietrichRequest : uint8_t {
   DIETRICH_REQ_SAMPLE = 0,
   DIETRICH_REQ_COUNTER1,
   DIETRICH_REQ_COUNTER2,
+  // the write path; see start_txn_() for the sequence these make up
+  DIETRICH_REQ_SERVICE_ON,
+  DIETRICH_REQ_SERVICE_OFF,
+  DIETRICH_REQ_WRITE_BLOCK,
   DIETRICH_REQ_PARAM0,
   DIETRICH_REQ_PARAM1,
   DIETRICH_REQ_PARAM2,
@@ -40,6 +46,11 @@ enum DietrichRequest : uint8_t {
 static const size_t DIETRICH_PARAM_BLOCKS = 8;
 static const size_t DIETRICH_PARAM_BLOCK_SIZE = 16;
 static const size_t DIETRICH_PARAM_BYTES = DIETRICH_PARAM_BLOCKS * DIETRICH_PARAM_BLOCK_SIZE;
+// EEPROM block indices the parameter block occupies, used as the EXT_COMMAND byte
+static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
+static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
+// STX + 6 header bytes + 16 data bytes + CRC16 + ETX
+static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
 
 enum DietrichState : uint8_t {
   DIETRICH_IDLE = 0,
@@ -47,9 +58,21 @@ enum DietrichState : uint8_t {
   DIETRICH_WAIT,
 };
 
+// What the write path has been asked to do. A request is staged by one of the
+// public write methods and picked up by loop() as soon as the bus is idle, so
+// nothing is ever injected into an exchange that is already in flight.
+enum DietrichTxn : uint8_t {
+  DIETRICH_TXN_NONE = 0,
+  DIETRICH_TXN_SERVICE_TEST,  // unlock then re-lock, touching nothing
+  DIETRICH_TXN_IDENTITY,      // read a block and write it straight back unchanged
+  DIETRICH_TXN_PARAM,         // read-modify-write one parameter byte
+  DIETRICH_TXN_RELOCK,        // re-lock only; used when the boiler boots unlocked
+};
+
 class Dietrich : public PollingComponent, public uart::UARTDevice {
  public:
   void set_variant(DietrichVariant variant) { this->variant_ = variant; }
+  void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
 
   // frame status/state
   SUB_SENSOR(state)
@@ -167,6 +190,27 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(param_pump_ch_max)          // p29, byte 28, x10 %
   SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
 
+  // --- writing ------------------------------------------------------------
+  // These are the whole write API, and they are meant to be called from a YAML
+  // lambda. Each returns true when the request was *accepted*, not when it
+  // completed: the exchange runs asynchronously in loop() and reports its result
+  // to the log. All of them refuse unless allow_writes is set on the component
+  // and the variant is pcu05_p3, and only one can be in flight at a time.
+
+  // Unlock service mode and immediately re-lock it, writing nothing at all.
+  // Sample byte 62 reports the state, so this tests the unlock path at no risk.
+  bool test_service_mode();
+
+  // Read one EEPROM block and write it back byte-for-byte unchanged, which
+  // exercises the write frame and the ACK without changing a setting. block is
+  // an EEPROM block index in 0x14..0x1B.
+  bool write_block_unchanged(uint8_t block);
+
+  // Read-modify-write a single parameter. param is the pNN number from the map
+  // in mapping/pcu05_p3_protocol.md; value is clamped to that parameter's
+  // documented range, and the write is skipped when the boiler already holds it.
+  bool write_param(uint8_t param, uint8_t value);
+
   void update() override;
   void loop() override;
   void dump_config() override;
@@ -176,7 +220,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void send_request_();
   void poll_response_();
   void advance_();
-  void handle_response_();
+  // false when the frame was missing, rejected or unusable
+  bool handle_response_();
   void decode_sample_();
   void decode_counter1_();
   void decode_counter2_();
@@ -184,6 +229,16 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // true when at least one param_* sensor is configured; nothing is requested
   // from the boiler otherwise
   bool want_params_() const;
+
+  // write path
+  bool stage_txn_(DietrichTxn txn, uint8_t block, uint8_t offset, uint8_t value, const char *what);
+  void start_txn_();
+  void finish_txn_();
+  // jump to the re-lock, which start_txn_() always leaves last in the queue
+  void skip_to_relock_();
+  // fills tx_buf_ from params_ plus the staged edit; only valid once the
+  // transaction's own read of that block has landed
+  void build_write_frame_(uint8_t block);
 
   void command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const;
   // number of header bytes before the data block in a response frame
@@ -217,6 +272,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // in flight, otherwise a short reason for the log
   const char *response_error_() const;
   static bool is_valid_crc_(const uint8_t *response, size_t n);
+  static uint16_t crc16_(const uint8_t *data, size_t from, size_t to);
+  // a write gets longer than a read; see WRITE_TIMEOUT_MS
+  static uint32_t timeout_for_(DietrichRequest req);
   static float signed_float_(float value);
   static float temp_or_nan_(uint16_t raw);
   static std::string hex_str_(const uint8_t *data, size_t len);
@@ -241,6 +299,28 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   uint32_t last_byte_time_{0};
   uint32_t next_send_time_{0};
   int counter_timer_{99};
+
+  // --- write path ---------------------------------------------------------
+  bool allow_writes_{false};
+
+  // staged by the public write methods, consumed by start_txn_()
+  DietrichTxn pending_txn_{DIETRICH_TXN_NONE};
+  uint8_t pending_block_{DIETRICH_PARAM_FIRST_BLOCK};
+  uint8_t pending_offset_{0};  // offset within that block, 0..15
+  uint8_t pending_value_{0};
+
+  // live for as long as a transaction is on the bus
+  bool txn_active_{false};
+  bool txn_failed_{false};
+  bool txn_read_ok_{false};  // the transaction's own read of txn_block_ landed
+  bool txn_wrote_{false};    // the write step was ACKed, so a verify is meaningful
+  DietrichTxn txn_kind_{DIETRICH_TXN_NONE};
+  uint8_t txn_block_{DIETRICH_PARAM_FIRST_BLOCK};
+  // the frame actually sent, kept intact so the verify read can be compared to it
+  uint8_t tx_buf_[DIETRICH_WRITE_FRAME_LEN]{};
+
+  // the boot service-mode check runs on the first long-enough sample only
+  bool seen_sample_{false};
 };
 
 }  // namespace dietrich
