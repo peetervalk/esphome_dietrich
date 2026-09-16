@@ -59,6 +59,23 @@ static const uint8_t CMD_PARAM_REMEHA[8][10] = {
 static const uint8_t CMD_SERVICE_ON_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x08, 0x0C, 0xAE, 0xCE, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x1F, 0x0C, 0xA1, 0x3E, 0x03};
 
+// The same eight reads addressed to the PCU (0x01) instead of 0x00, which is how
+// Recom sends them. Used only inside a write transaction: everything Recom does
+// on the write path - unlock, read, write, re-lock - is addressed to one device,
+// and a frame aimed at a different address in the middle of that sequence is one
+// of the few remaining ways this component still differs from it. Polling keeps
+// using the 0x00 table above, which is known to work on this bus.
+static const uint8_t CMD_PARAM_REMEHA_PCU[8][10] = {
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x14, 0xA4, 0xC4, 0x03},  // bytes   0..15
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x15, 0x65, 0x04, 0x03},  // bytes  16..31
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x16, 0x25, 0x05, 0x03},  // bytes  32..47
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x17, 0xE4, 0xC5, 0x03},  // bytes  48..63
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x18, 0xA4, 0xC1, 0x03},  // bytes  64..79
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x19, 0x65, 0x01, 0x03},  // bytes  80..95
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x1A, 0x25, 0x00, 0x03},  // bytes  96..111
+    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x1B, 0xE4, 0xC0, 0x03},  // bytes 112..127
+};
+
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
 static const uint8_t CMD_COUNTER1_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x01, 0x40, 0x03};
@@ -442,7 +459,8 @@ void Dietrich::pub_counter_(sensor::Sensor *s, size_t off, float scale) {
 void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *len) const {
   if (req >= DIETRICH_REQ_PARAM0) {
     const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
-    *cmd = CMD_PARAM_REMEHA[blk];
+    // inside a write transaction, address the PCU exactly as Recom does
+    *cmd = this->txn_active_ ? CMD_PARAM_REMEHA_PCU[blk] : CMD_PARAM_REMEHA[blk];
     *len = sizeof(CMD_PARAM_REMEHA[blk]);
     return;
   }
@@ -569,25 +587,35 @@ void Dietrich::decode_sample_() {
   // current state. Gated on allow_writes: re-locking a board that somebody else
   // deliberately unlocked is not this component's business otherwise.
   // Reached only from inside a service mode test; see start_txn_().
-  if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_SERVICE_TEST && this->have_(62, 1)) {
-    const uint8_t sm = this->d_(62);
-    if (sm != 0) {
-      ESP_LOGI(TAG, "service mode readback: byte 62 = %u, the unlock took effect", static_cast<unsigned>(sm));
+  //
+  // The P3 map labels byte 62 `service_mode` and byte 63 `rs232_mode`, but on a
+  // live PCU-05 P3 it is **byte 63** that goes 0 -> 1 for exactly the duration of
+  // the CODE_SERVICE_START / CODE_SERVICE_STOP window, while byte 62 stays 0
+  // throughout. Diffing a sample taken inside the window against one taken three
+  // seconds later shows byte 63 and nothing else but drifting temperatures. So
+  // byte 63 is the flag to trust here, whatever the map calls it - plausibly the
+  // board considers the service command to be putting it under RS232/PC control.
+  if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_SERVICE_TEST && this->have_(63, 1)) {
+    const unsigned b62 = this->d_(62), b63 = this->d_(63);
+    if (b63 != 0) {
+      ESP_LOGI(TAG, "service mode readback: byte 62 = %u, byte 63 = %u - the unlock took effect", b62, b63);
     } else {
       ESP_LOGE(TAG,
-               "service mode readback: byte 62 = 0, the unlock was ACKed but did NOT take effect - "
-               "EEPROM writes will be ignored");
+               "service mode readback: byte 62 = %u, byte 63 = 0 - the unlock was ACKed but did NOT "
+               "take effect, EEPROM writes will be ignored",
+               b62);
     }
   }
 
   // Samples taken inside a transaction are deliberately excluded: the boot check
   // is about finding the boiler already unlocked, not about this component's own
   // unlocking.
-  if (!this->seen_sample_ && !this->txn_active_ && this->have_(62, 1)) {
+  if (!this->seen_sample_ && !this->txn_active_ && this->have_(63, 1)) {
     this->seen_sample_ = true;
-    if (this->allow_writes_ && this->d_(62) != 0) {
-      ESP_LOGW(TAG, "boiler is in service mode at boot (sample byte 62 = %u), re-locking",
-               static_cast<unsigned>(this->d_(62)));
+    // byte 63, for the reason given above
+    if (this->allow_writes_ && this->d_(63) != 0) {
+      ESP_LOGW(TAG, "boiler is in service mode at boot (sample byte 63 = %u), re-locking",
+               static_cast<unsigned>(this->d_(63)));
       this->stage_txn_(DIETRICH_TXN_RELOCK, DIETRICH_PARAM_FIRST_BLOCK, 0, 0, "boot re-lock");
     }
   }

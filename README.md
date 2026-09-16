@@ -85,7 +85,7 @@ to uncomment, in the order they are worth trying:
 
 | Method | What it does |
 |---|---|
-| `test_service_mode()` | unlock, read back sample byte 62 to confirm it engaged, re-lock |
+| `test_service_mode()` | unlock, read a sample back to confirm it engaged, re-lock |
 | `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
 | `write_param(p, v)` | read-modify-write one parameter |
 

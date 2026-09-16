@@ -60,6 +60,7 @@ struct FakeBoiler {
   bool writes_take_effect{true};
 
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
+  std::vector<uint8_t> read_dests;  // the address each READ_EPROM_BLOCK was sent to
   std::vector<std::vector<uint8_t>> written_frames;
   std::deque<uint8_t> tx;  // bytes heading for the ESP
 
@@ -79,6 +80,7 @@ struct FakeBoiler {
     service_mode_engages = true;
     writes_take_effect = true;
     reads = writes = service_on = service_off = rejected_writes = 0;
+    read_dests.clear();
     written_frames.clear();
     tx.clear();
   }
@@ -121,12 +123,14 @@ struct FakeBoiler {
       uint8_t sample[64]{};
       sample[0] = 0x47; sample[1] = 0x0D;  // flow ~33.99 C
       sample[40] = 8;                       // state
-      sample[62] = service_mode ? 1 : 0;    // service mode readback
+      sample[62] = 0;                       // stays 0 on a real PCU-05 P3
+      sample[63] = service_mode ? 1 : 0;    // what actually tracks service mode
       respond(src, dst, cmd, ext, sample, sizeof(sample));
       return;
     }
     if (cmd == 0x10) {  // READ_EPROM_BLOCK
       reads++;
+      read_dests.push_back(dst);
       if (!answer_reads)
         return;
       if (ext < 0x14 || ext > 0x1F)
@@ -300,6 +304,11 @@ int main() {
     check(memcmp(before + 1, g_boiler.eeprom[2] + 1, 15) == 0, "the other 15 bytes of the block are untouched");
     check(!g_boiler.service_mode, "boiler left locked");
     check(logged("parameter write of block 0x16 verified"), "verified by read-back");
+    bool all_to_pcu = !g_boiler.read_dests.empty();
+    for (uint8_t a : g_boiler.read_dests)
+      if (a != 0x01)
+        all_to_pcu = false;
+    check(all_to_pcu, "every read in the transaction was addressed to the PCU (0x01), as Recom does");
     delete d;
   }
 

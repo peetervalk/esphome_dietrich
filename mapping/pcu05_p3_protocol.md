@@ -272,13 +272,41 @@ Two candidate explanations, in order of suspicion:
 1. **The full 0x14 — 0x1B sequence is required.** `SetParameterModel` never writes a
    single block: `SetEepromData(buffer, 0x14, 8, dest)` always sends all eight in one
    service-mode session. A partial parameter image may simply be dropped.
-2. **Service mode never actually engaged.** `CODE_SERVICE_START`'s reply carries no
-   payload, so its ACK says the frame parsed, not that the board unlocked. Sample
-   byte 62 reports the real state and had not been read *inside* the window.
+2. ~~**Service mode never actually engaged.**~~ **Ruled out** — see below.
 
-`Dietrich::test_service_mode()` now reads a sample between the unlock and the
-re-lock and logs byte 62, which settles (2) at no risk and without an EEPROM cycle.
-Settle it before attempting (1).
+### Service mode engages, and it is reported by byte 63, not byte 62
+
+`Dietrich::test_service_mode()` reads a sample between the unlock and the re-lock.
+Diffing that sample against one taken three seconds after the re-lock, on the same
+board:
+
+| Data byte | Inside the window | After the re-lock | |
+|---|---|---|---|
+| 0, 2, 8, 51 | — | — | flow / return / calorifier / control temp, drifting |
+| **63** | **01** | **00** | tracks the service-mode window exactly |
+| 62 | 00 | 00 | never set |
+
+Nothing else in all 64 bytes differs. So `CODE_SERVICE_START` **does** take effect,
+and the flag for it is **byte 63** — which this map labels `rs232_mode`, not byte
+62, which it labels `service_mode`. Plausibly the board regards the service command
+as putting it under RS232/PC control and the label is simply describing that; either
+way, byte 63 is the observable to trust. The component reads byte 63 for its
+service-mode check and for the boot re-lock, and logs both bytes.
+
+> The `service_mode` sensor still publishes byte 62 and the `rs232_mode` sensor
+> byte 63, so existing configurations keep their meaning. On this board it is
+> `rs232_mode` that moves.
+
+That leaves (1) as the standing explanation, plus one difference from Recom that
+had gone unnoticed: **this component's parameter reads are addressed to `0x00`,
+while Recom addresses everything on the write path to `0x01`.** A frame aimed at a
+different device in the middle of an unlock/write sequence is a cheaper suspect
+than the block count, so it is worth eliminating first. Inside a write transaction
+the component now uses the `0x01` read frames listed under *Reading a parameter*;
+polling still uses `0x00`, which is known to work.
+
+If a single-block write is still ACKed and ignored with every frame addressed to
+`0x01`, the remaining difference from Recom is the block count, and (1) is next.
 
 ### What the component implements
 
