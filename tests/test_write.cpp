@@ -62,7 +62,14 @@ static const uint8_t REAL_PARAM_IMAGE[128] = {
 };
 
 struct FakeBoiler {
-  uint8_t eeprom[12][16]{};  // blocks 0x14..0x1F
+  uint8_t eeprom[12][16]{};  // blocks 0x14..0x1F, at the address in eeprom_addr
+  // The real board answers READ_EPROM_BLOCK on both 0x00 and 0x01, echoing back
+  // whichever it was sent - but only one of them holds the parameter image the
+  // boiler runs on. The other answers sixteen FF bytes for every block it has
+  // never been written, and quietly keeps whatever is written to it. That is what
+  // made a write ACK and change nothing; see mapping/pcu05_p3_protocol.md.
+  uint8_t stray[12][16]{};
+  uint8_t eeprom_addr{0x00};
   bool service_mode{false};
   bool answer_reads{true};
   bool answer_writes{true};
@@ -87,6 +94,8 @@ struct FakeBoiler {
     for (int b = 8; b < 12; b++)
       for (int i = 0; i < 16; i++)
         eeprom[b][i] = static_cast<uint8_t>(0xA0 + b);  // counter blocks, filler
+    memset(stray, 0xFF, sizeof(stray));
+    eeprom_addr = 0x00;
     service_mode = false;
     answer_reads = answer_writes = answer_service = true;
     require_service_for_write = true;
@@ -148,7 +157,7 @@ struct FakeBoiler {
         return;
       if (ext < 0x14 || ext > 0x1F)
         return;
-      respond(src, dst, cmd, ext, eeprom[ext - 0x14], 16);
+      respond(src, dst, cmd, ext, dst == eeprom_addr ? eeprom[ext - 0x14] : stray[ext - 0x14], 16);
       return;
     }
     if (cmd == 0x11) {  // WRITE_EPROM_BLOCK
@@ -159,7 +168,7 @@ struct FakeBoiler {
       writes++;
       written_frames.emplace_back(f, f + n);
       if (writes_take_effect && ext >= 0x14 && ext <= 0x1F && n == 26)
-        memcpy(eeprom[ext - 0x14], f + 7, 16);
+        memcpy(dst == eeprom_addr ? eeprom[ext - 0x14] : stray[ext - 0x14], f + 7, 16);
       if (!answer_writes)
         return;
       respond(src, dst, cmd, ext, nullptr, 0);
@@ -298,7 +307,7 @@ int main() {
       const auto &f = g_boiler.written_frames[0];
       check(f.size() == 26, "write frame is 26 bytes");
       check(f[3] == 0x05 && f[4] == 0x18 && f[5] == 0x11 && f[6] == 0x16, "type/len/COMMAND/EXT correct");
-      check(f[1] == 0xFE && f[2] == 0x01, "addressed PC -> PCU");
+      check(f[1] == 0xFE && f[2] == 0x00, "addressed to the same device the reads go to");
       const uint16_t c = FakeBoiler::crc16(f.data(), 1, f.size() - 3);
       check((f[23] | (f[24] << 8)) == c && f[25] == 0x03, "CRC and ETX correct");
     }
@@ -321,11 +330,28 @@ int main() {
     check(changed == 1, "exactly one byte of the whole 128 byte image changed");
     check(!g_boiler.service_mode, "boiler left locked");
     check(logged("parameter write verified: 8 block(s) from 0x14"), "verified by read-back");
-    bool all_to_pcu = !g_boiler.read_dests.empty();
+    bool one_address = !g_boiler.read_dests.empty();
     for (uint8_t a : g_boiler.read_dests)
-      if (a != 0x01)
-        all_to_pcu = false;
-    check(all_to_pcu, "every read in the transaction was addressed to the PCU (0x01), as Recom does");
+      if (a != 0x00)
+        one_address = false;
+    check(one_address, "every read in the transaction went to the device that holds the image");
+    delete d;
+  }
+
+  // -- 3b. the reads land on the device that does not hold the image ---------
+  {
+    begin("reads answered by the wrong device (FF for every block)");
+    auto *d = make();
+    g_boiler.eeprom_addr = 0x01;  // the parameter image is not where we are asking
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d);
+    check(g_boiler.writes == 0, "not one byte written on the back of an FF read");
+    check(logged("block 0x14 read back implausible"),
+          "refused at the first block, not after reading all eight");
+    check(!logged("block 0x15 read back implausible"), "gave up immediately rather than reading on");
+    check(!logged("parameter block: FFFFFFFF"), "the FF read never reached the published image");
+    check(g_boiler.service_off >= 1 && !g_boiler.service_mode, "boiler left locked");
+    check(logged("parameter write failed"), "reported as a failure");
     delete d;
   }
 
@@ -375,7 +401,8 @@ int main() {
     pump(*d);
     check(g_boiler.writes == 0, "nothing written at all");
     check(g_boiler.eeprom[2][0] == 4, "p33 untouched");
-    check(logged("p17 (byte 16) reads 200, outside its documented 10..100"), "the offending byte is named");
+    check(logged("block 0x15 read back implausible: p17 (byte 16) is 200, outside its documented 10..100"),
+          "the offending byte is named, and the block it came in");
     check(!g_boiler.service_mode, "boiler left locked");
     delete d;
   }

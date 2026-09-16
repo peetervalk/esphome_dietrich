@@ -33,11 +33,17 @@ static const uint8_t CMD_COUNTER2_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10
 
 // Parameter block reads: COMMAND 0x10 (READ_EPROM_BLOCK) with the EEPROM block
 // index in the EXTCMD byte. Blocks 0x14..0x1B are the 128 byte parameter block,
-// 16 bytes per reply. Byte 2 is 0x00 to match the counter reads, which are the
-// same command against blocks 0x1C/0x1D and are known to work on this bus. Note
-// 0x00 is nominally the PSU's address and 0x01 the PCU's: the board answers on
-// either, echoing back whichever it was sent. Writes should still use 0x01, which
-// is what Recom does.
+// 16 bytes per reply. Byte 2 is 0x00, the same address the counter reads use.
+//
+// 0x00 is nominally the PSU and 0x01 the PCU, and both answer READ_EPROM_BLOCK
+// echoing back whichever address they were sent - but not with the same bytes.
+// On a PCU-05 P3, 0x00 returns the real parameter image for all eight blocks,
+// while 0x01 returns sixteen FF bytes for every block except 0x16, whose contents
+// are the image this component's own earlier single-block writes left there. The
+// parameter EEPROM the boiler actually runs on is the one at 0x00, so the whole
+// EEPROM path - read, write and verify - is addressed there. Service mode stays
+// at 0x01, which is where it is observed to engage. See
+// mapping/pcu05_p3_protocol.md.
 static const uint8_t CMD_PARAM_REMEHA[8][10] = {
     {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x14, 0x99, 0x04, 0x03},  // bytes   0..15
     {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x15, 0x58, 0xC4, 0x03},  // bytes  16..31
@@ -54,27 +60,13 @@ static const uint8_t CMD_PARAM_REMEHA[8][10] = {
 // 0x1F (CODE_SERVICE_STOP) re-locks it, both with EXTCMD 0x0C (CODE_SERVICE).
 // No service code is sent - the 0012 PIN Recom asks for is an application-level
 // gate only, and nothing in the write path touches SERVICE_CODE (0x37).
-// Addressed to the PCU at 0x01, which is what Recom does for the write path;
-// reads get away with 0x00 but there is no reason to risk it here.
+// Addressed to the PCU at 0x01, which is what Recom does and where sample byte 63
+// is observed to move. The EEPROM frames go to 0x00 instead - that is where this
+// board's parameter image lives - so the unlock and the write do not reach the
+// same address. If a write to 0x00 is refused, unlocking at 0x00 too is the next
+// thing to try.
 static const uint8_t CMD_SERVICE_ON_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x08, 0x0C, 0xAE, 0xCE, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x1F, 0x0C, 0xA1, 0x3E, 0x03};
-
-// The same eight reads addressed to the PCU (0x01) instead of 0x00, which is how
-// Recom sends them. Used only inside a write transaction: everything Recom does
-// on the write path - unlock, read, write, re-lock - is addressed to one device,
-// and a frame aimed at a different address in the middle of that sequence is one
-// of the few remaining ways this component still differs from it. Polling keeps
-// using the 0x00 table above, which is known to work on this bus.
-static const uint8_t CMD_PARAM_REMEHA_PCU[8][10] = {
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x14, 0xA4, 0xC4, 0x03},  // bytes   0..15
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x15, 0x65, 0x04, 0x03},  // bytes  16..31
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x16, 0x25, 0x05, 0x03},  // bytes  32..47
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x17, 0xE4, 0xC5, 0x03},  // bytes  48..63
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x18, 0xA4, 0xC1, 0x03},  // bytes  64..79
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x19, 0x65, 0x01, 0x03},  // bytes  80..95
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x1A, 0x25, 0x00, 0x03},  // bytes  96..111
-    {0x02, 0xFE, 0x01, 0x05, 0x08, 0x10, 0x1B, 0xE4, 0xC0, 0x03},  // bytes 112..127
-};
 
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
@@ -496,8 +488,7 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
 
   if (req >= DIETRICH_REQ_PARAM0) {
     const size_t blk = static_cast<size_t>(req) - DIETRICH_REQ_PARAM0;
-    // inside a write transaction, address the PCU exactly as Recom does
-    *cmd = this->txn_active_ ? CMD_PARAM_REMEHA_PCU[blk] : CMD_PARAM_REMEHA[blk];
+    *cmd = CMD_PARAM_REMEHA[blk];
     *len = sizeof(CMD_PARAM_REMEHA[blk]);
     return;
   }
@@ -741,7 +732,7 @@ uint8_t Dietrich::block_of_(DietrichRequest req) {
   return static_cast<uint8_t>(DIETRICH_PARAM_FIRST_BLOCK + (req - base));
 }
 
-// 02 | FE | 01 | 05 | 18 | 11 | blk | 16 data bytes | CRClo CRChi | 03
+// 02 | FE | 00 | 05 | 18 | 11 | blk | 16 data bytes | CRClo CRChi | 03
 //
 // The payload comes from txn_image_, which begin_write_phase_() assembled out of
 // the blocks this transaction read for itself plus the one staged edit.
@@ -750,7 +741,7 @@ void Dietrich::build_write_frame_(uint8_t block) {
 
   this->tx_buf_[0] = 0x02;
   this->tx_buf_[1] = 0xFE;  // sender: the PC
-  this->tx_buf_[2] = 0x01;  // recipient: the PCU
+  this->tx_buf_[2] = 0x00;  // recipient: whoever answers the parameter reads
   this->tx_buf_[3] = 0x05;  // request
   this->tx_buf_[4] = static_cast<uint8_t>(DIETRICH_WRITE_FRAME_LEN - 2);
   this->tx_buf_[5] = 0x11;  // WRITE_EPROM_BLOCK
@@ -779,20 +770,45 @@ bool Dietrich::image_is_sane_() const {
       (static_cast<size_t>(this->txn_first_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
   const size_t hi = lo + static_cast<size_t>(this->txn_block_count_) * DIETRICH_PARAM_BLOCK_SIZE;
 
-  bool sane = true;
   for (size_t i = 0; i < PARAM_SANITY_LEN; i++) {
     const ParamLimit &s = PARAM_SANITY[i];
     if (s.offset < lo || s.offset >= hi)
       continue;
-    const uint8_t v = this->params_[s.offset];
+    const uint8_t v = this->txn_read_[s.offset];
     if (v < s.min || v > s.max) {
+      // the first bad byte is enough: report it and stop, rather than walking the
+      // rest of the table logging a line per parameter and blocking the loop
       ESP_LOGE(TAG, "refusing to write: p%u (byte %u) reads %u, outside its documented %u..%u",
                static_cast<unsigned>(s.param), static_cast<unsigned>(s.offset), static_cast<unsigned>(v),
                static_cast<unsigned>(s.min), static_cast<unsigned>(s.max));
-      sane = false;
+      return false;
     }
   }
-  return sane;
+  return true;
+}
+
+// The same check for one freshly arrived block, so a transaction gives up on the
+// block that came back wrong instead of reading all eight and only then finding
+// out. Sixteen FF bytes where a parameter block should be is exactly what a read
+// aimed at the wrong device address looks like.
+bool Dietrich::block_is_sane_(size_t blk) const {
+  const size_t lo = blk * DIETRICH_PARAM_BLOCK_SIZE;
+  const size_t hi = lo + DIETRICH_PARAM_BLOCK_SIZE;
+
+  for (size_t i = 0; i < PARAM_SANITY_LEN; i++) {
+    const ParamLimit &s = PARAM_SANITY[i];
+    if (s.offset < lo || s.offset >= hi)
+      continue;
+    const uint8_t v = this->txn_read_[s.offset];
+    if (v < s.min || v > s.max) {
+      ESP_LOGE(TAG, "block 0x%02X read back implausible: p%u (byte %u) is %u, outside its documented %u..%u",
+               static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK + blk), static_cast<unsigned>(s.param),
+               static_cast<unsigned>(s.offset), static_cast<unsigned>(v), static_cast<unsigned>(s.min),
+               static_cast<unsigned>(s.max));
+      return false;
+    }
+  }
+  return true;
 }
 
 bool Dietrich::begin_write_phase_() {
@@ -818,13 +834,13 @@ bool Dietrich::begin_write_phase_() {
     return false;
   }
 
-  memcpy(this->txn_image_, this->params_, DIETRICH_PARAM_BYTES);
+  memcpy(this->txn_image_, this->txn_read_, DIETRICH_PARAM_BYTES);
 
   if (this->txn_kind_ == DIETRICH_TXN_PARAM) {
     // A parameter that already holds the wanted value is not worth an EEPROM
     // cycle, and endurance is finite. The check waits until here because it needs
     // the block this transaction just read, not a stale copy from the sweep.
-    if (this->params_[this->pending_byte_] == this->pending_value_) {
+    if (this->txn_read_[this->pending_byte_] == this->pending_value_) {
       ESP_LOGI(TAG, "parameter already reads %u, skipping the write", static_cast<unsigned>(this->pending_value_));
       this->skip_to_relock_();
       return false;
@@ -986,13 +1002,13 @@ void Dietrich::finish_txn_() {
     // the boiler is locked. Re-arm the boot check so the next sample settles it.
     this->seen_sample_ = false;
   } else if (this->txn_wrote_) {
-    // params_ now holds the verify reads, txn_image_ what the boiler was told
+    // txn_read_ now holds the verify reads, txn_image_ what the boiler was told
     const size_t lo =
         (static_cast<size_t>(this->txn_first_block_) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
     const size_t hi = lo + static_cast<size_t>(this->txn_block_count_) * DIETRICH_PARAM_BLOCK_SIZE;
     size_t differing = 0, first_diff = 0;
     for (size_t i = lo; i < hi; i++) {
-      if (this->params_[i] != this->txn_image_[i]) {
+      if (this->txn_read_[i] != this->txn_image_[i]) {
         if (differing == 0)
           first_diff = i;
         differing++;
@@ -1001,10 +1017,16 @@ void Dietrich::finish_txn_() {
     if (differing == 0) {
       ESP_LOGI(TAG, "%s verified: %u block(s) from 0x%02X read back exactly as written", kind,
                static_cast<unsigned>(this->txn_block_count_), static_cast<unsigned>(this->txn_first_block_));
+      // The verify reads are the freshest truth there is about these blocks, so
+      // fold them into the published image instead of waiting out the next sweep.
+      memcpy(this->params_ + lo, this->txn_read_ + lo, hi - lo);
+      if (this->param_blocks_seen_ == 0xFF)
+        this->decode_params_();
     } else {
       ESP_LOGE(TAG, "%s was ACKed but %u byte(s) read back different; first is byte %u: wrote %u, read %u", kind,
                static_cast<unsigned>(differing), static_cast<unsigned>(first_diff),
-               static_cast<unsigned>(this->txn_image_[first_diff]), static_cast<unsigned>(this->params_[first_diff]));
+               static_cast<unsigned>(this->txn_image_[first_diff]),
+               static_cast<unsigned>(this->txn_read_[first_diff]));
     }
   } else {
     ESP_LOGI(TAG, "%s finished, nothing was written", kind);
@@ -1076,12 +1098,25 @@ bool Dietrich::handle_response_() {
                static_cast<unsigned>(DIETRICH_PARAM_BLOCK_SIZE));
       return false;
     }
+    if (this->txn_active_) {
+      // A transaction's reads are working material, not published state: they go
+      // to txn_read_ and reach params_ only once a write has verified. A refused
+      // or failed transaction then leaves the parameter sensors exactly as the
+      // last good sweep left them.
+      for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
+        this->txn_read_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
+      // Only the read phase is checked. After the write, a block that disagrees
+      // is the verify's business to report, not a reason to abort something that
+      // has already gone out.
+      if (!this->txn_wrote_ && !this->block_is_sane_(blk))
+        return false;
+      this->txn_blocks_read_ |= static_cast<uint8_t>(1u << blk);
+      return true;
+    }
+
     for (size_t i = 0; i < DIETRICH_PARAM_BLOCK_SIZE; i++)
       this->params_[blk * DIETRICH_PARAM_BLOCK_SIZE + i] = this->d_(i);
     this->param_blocks_seen_ |= static_cast<uint8_t>(1u << blk);
-    // a whole block, read inside this transaction: safe to write back
-    if (this->txn_active_)
-      this->txn_blocks_read_ |= static_cast<uint8_t>(1u << blk);
     // publish only once the whole sweep is in, so the values are consistent
     if (this->param_blocks_seen_ == 0xFF)
       this->decode_params_();

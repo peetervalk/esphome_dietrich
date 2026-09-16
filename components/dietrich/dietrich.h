@@ -257,6 +257,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // true when every documented parameter inside the blocks about to be written
   // reads inside its range - i.e. the image is plausibly a real one
   bool image_is_sane_() const;
+  bool block_is_sane_(size_t blk) const;
   // fills tx_buf_ from txn_image_; only valid after begin_write_phase_()
   void build_write_frame_(uint8_t block);
   static bool is_write_req_(DietrichRequest req);
@@ -342,6 +343,12 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   uint8_t txn_block_count_{1};
   // bit n set once block n has been read back whole inside this transaction
   uint8_t txn_blocks_read_{0};
+  // Every block a transaction reads lands here, never in params_. A transaction
+  // that ends up refusing to write must not have moved the published parameter
+  // sensors on its way there, and a read that came back wrong must not become the
+  // source for the next read-modify-write. params_ is updated from here only
+  // after a write has verified.
+  uint8_t txn_read_[DIETRICH_PARAM_BYTES]{};
   // the image this transaction intends the boiler to end up holding: the blocks
   // it read for itself, plus the one staged edit. The verify reads are compared
   // against this.

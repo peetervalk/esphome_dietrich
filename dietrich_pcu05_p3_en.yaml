@@ -294,8 +294,7 @@ sensor:
 #   #    because it changes nothing - but note what it cannot tell you: writing
 #   #    identical bytes reads back identical either way, so "identity write
 #   #    verified" means the frame was accepted, NOT that the board applied it.
-#   #    It stays single-block on purpose, as a frame-level check - on a PCU-05
-#   #    P3 a lone block write is expected to be ignored.
+#   #    It stays single-block on purpose, as a frame-level check.
 #   - platform: template
 #     name: "Boiler identity write block 0x16"
 #     entity_category: diagnostic
@@ -310,10 +309,17 @@ sensor:
 #   #    EEPROM cycle, not two.
 #   #
 #   #    This writes all eight EEPROM blocks in one service-mode session, as
-#   #    Recom does - a PCU-05 P3 ACKs a single-block write and then ignores it.
-#   #    That is 26 exchanges and about three seconds, and it borrows one poll
-#   #    interval. The freshly read image is range-checked before any of it goes
-#   #    back, so a corrupted read is refused rather than written into EEPROM.
+#   #    Recom does. That is 26 exchanges and about three seconds, and it borrows
+#   #    one poll interval. Every block is range-checked as it arrives and the
+#   #    whole image again before any of it goes back, so a corrupted read is
+#   #    refused rather than written into EEPROM, and nothing a transaction reads
+#   #    reaches the sensors until a write has verified.
+#   #
+#   #    Earlier attempts were ACKed and changed nothing: the EEPROM path was
+#   #    addressed to 0x01, which turns out to hold a different, blank image from
+#   #    the 0x00 the parameters are polled from - it accepted the bytes and put
+#   #    them where nothing reads them. Read, write and verify all go to 0x00 now,
+#   #    so this is the first press that writes where the boiler will see it.
 #   #    See mapping/pcu05_p3_protocol.md.
 #   - platform: template
 #     name: "Boiler set DHW hysteresis to 6"

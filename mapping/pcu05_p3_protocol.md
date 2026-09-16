@@ -53,8 +53,13 @@ talking to — so for a boiler, `[2] = 0x01`.
 > `dietrich.cpp` sends the sample request to `0x01` but the counter and parameter
 > reads to `0x00`, which is nominally the **PSU**, not the PCU. The board answers on
 > either and **echoes back whichever address it was sent** — verified on a PCU-05 P3
-> against both — so the swap rule below holds regardless of which is used. Writes
-> should nevertheless be addressed to `0x01`, which is what Recom does.
+> against both — so the swap rule below holds regardless of which is used.
+>
+> Answering, however, is not the same as answering with the same bytes. On this
+> board `0x00` and `0x01` have **different EEPROM contents**, and only `0x00` holds
+> the parameter image the boiler runs on — see *The read address was it after all*.
+> The whole EEPROM path is addressed to `0x00`; service mode stays at `0x01`, where
+> it is observed to engage.
 
 ## Response validation
 
@@ -160,7 +165,9 @@ Plain `READ_EPROM_BLOCK`, no unlock needed:
 ```
 
 Byte `[2]` is `0x01` (PCU) in the sample request and `0x00` (PSU) in the counter
-requests; both are answered, so the board does not enforce it on reads.
+requests; both are answered, so the board does not enforce it on reads. The frames
+above are kept for the record only — the component sends the `0x00` forms, because
+the `0x01` ones do not return this boiler's parameters. See below.
 
 ## Writing a parameter
 
@@ -297,20 +304,58 @@ service-mode check and for the boot re-lock, and logs both bytes.
 > byte 63, so existing configurations keep their meaning. On this board it is
 > `rs232_mode` that moves.
 
-### The read address was not it either
+### The read address was it after all
 
 One further difference from Recom had gone unnoticed: this component's parameter
 reads were addressed to `0x00`, while Recom addresses everything on the write path
-to `0x01`. A frame aimed at a different device in the middle of an unlock/write
-sequence is a cheaper suspect than the block count, so it was eliminated first.
-Inside a write transaction the component now uses the `0x01` read frames listed
-under *Reading a parameter*; polling still uses `0x00`, which is known to work.
+to `0x01`. The component was changed to read from `0x01` inside a write
+transaction, retested single-block against `0x16`, and the reads "came back from
+`0x01` as expected" — so the address was written off as a dead end.
 
-Retested on the same board with every frame addressed to `0x01` — unlock, read,
-write, re-lock. The unlock was confirmed engaged (byte 63 = 1) and the reads came
-back from `0x01` as expected. **The write was ACKed and p33 still did not move.**
-So the destination address is not the cause, and the burner state is not either:
-the attempts span both `state 8` (controlled stop) and `state 3` (burning CH).
+That test was single-block, and `0x16` is the one block for which it could not
+fail. Reading all eight blocks from `0x01` settles it:
+
+```
+0201FE06 18 1014 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 2563 03   # and 0x15, 0x17..0x1B
+0201FE06 18 1016 060001010000000200AF1E02FFFFFFFF 7811 03
+```
+
+Every frame is well-formed — length byte right, block index echoed, addresses
+swapped, CRC good. **`0x01` answers sixteen `FF` bytes for seven of the eight
+parameter blocks.** The same eight blocks read from `0x00` return the full,
+plausible image this document records.
+
+The one block that is not `FF` gives the game away. `0x01`'s block `0x16` reads
+byte-for-byte identical to the captured image except at byte 32 — **p33, which
+reads 6 there and 4 at `0x00`**. 6 is precisely what the earlier single-block
+write attempts asked for. So those writes were not ignored at all:
+
+- `0x00` and `0x01` are **two different EEPROM stores**. `0x00` holds the
+  parameter set the boiler runs on; `0x01` is blank (`FF`) apart from what this
+  component has written into it.
+- `WRITE_EPROM_BLOCK` to `0x01` is accepted, ACKed, **and stored** — in a place
+  nothing reads. That is the whole of "the write was ACKed and p33 did not move".
+- The verify read that confirmed the write "took" was reading `0x01` back, so it
+  agreed with itself.
+
+Whatever Recom's `DeviceIdentifier` table calls these addresses, on this board the
+parameter EEPROM is the one at `0x00`. The component addresses the whole EEPROM
+path — read, write and verify — there, and keeps service mode at `0x01`, which is
+where byte 63 is observed to move. The block count may still matter; it is simply
+no longer the only difference left, and it was never the one doing the damage.
+
+> If a full-block write to `0x00` is refused, the next thing to try is sending
+> `CODE_SERVICE_START` to `0x00` as well, so the unlock and the write reach the
+> same device.
+
+#### What it broke on the way
+
+Until this was found, a transaction's reads were copied straight into `params_`,
+the same buffer the parameter sensors publish from. Eight `FF` blocks therefore
+arrived in Home Assistant as p1 = 255, p28 = 2550 % and so on, and would have been
+the source bytes for the next read-modify-write had the sanity check not refused
+the write first. A transaction now reads into a buffer of its own and touches
+`params_` only after a write has verified.
 
 ### What the component does now
 
@@ -331,17 +376,25 @@ uses this; `write_block_unchanged()` stays deliberately single-block, as the
 frame-level diagnostic it always was — on this board it is expected to be ignored.
 
 Handing back 127 bytes verbatim is a real step up in risk from one block, because
-the bytes include the gas/air settings and the controller-protection limits. Two
+the bytes include the gas/air settings and the controller-protection limits. Three
 guards stand in front of it:
 
 - **Every block must have been read by this transaction**, whole and CRC-valid.
   A missing block aborts to the re-lock without writing anything.
-- **The image must be plausible.** Before any of it goes back, 58 documented
-  parameters — deliberately including every one this component refuses to write —
-  are checked against the ranges in the table below. A block that arrived mangled
-  but with a valid CRC shows up as a parameter outside its range, and the whole
-  transaction is refused with the offending byte named. All 58 fall inside their
-  ranges on the live image above, so the check does not fire spuriously.
+- **The image must be plausible.** 58 documented parameters — deliberately
+  including every one this component refuses to write — are checked against the
+  ranges in the table below. Each block is checked the moment it arrives, so a
+  transaction gives up on the first bad block instead of reading all eight and
+  naming forty-five bad bytes in one pass of `loop()`; the check runs again over
+  the whole image as the last gate before any byte goes out. A block that arrived
+  mangled but with a valid CRC, or an `FF` block from the wrong device, shows up
+  as a parameter outside its range and the transaction is refused with the
+  offending byte named. All 58 fall inside their ranges on the live image above,
+  so the check does not fire spuriously.
+- **A transaction's reads never reach the sensors.** They land in a buffer of the
+  transaction's own; `params_`, which the parameter sensors publish from, is
+  updated only once a write has verified. A refused transaction leaves Home
+  Assistant showing what the last good sweep read.
 
 If the boiler still declines a full-block write, the next things to look at are
 `SERVICE_CODE` (`0x37`, the 0012 PIN Recom asks for, which the IL says is never
