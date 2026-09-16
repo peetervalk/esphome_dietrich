@@ -446,6 +446,72 @@ If the boiler still declines a full-block write, the next things to look at are
 sent) and `IDENTIFICATION` (`0x01`/`0x0B`), which Recom issues when it connects
 and this component never does.
 
+### The full-block write lands, and the PCU blocks on it
+
+2026-09-16 14:23, the first press that wrote where the boiler reads. It worked, and
+the boiler did not like it.
+
+The transaction is in the log byte for byte. Block `0x16` was read as
+`04 00 01 01 …`, written as `06 00 01 01 …`, and read back as `06 00 01 01 …`; the
+other seven blocks went out identical to the bytes they came in as. p33 = 6 is in
+the EEPROM at `0x00`. Fourteen seconds later the next sample read:
+
+| Byte | Field | Value | Meaning |
+|---|---|---|---|
+| 40 | STATUS | 9 | Blocking mode |
+| 41 | LOCKING | 255 | none |
+| 42 | BLOCKING | **0** | **PCU parameter fault** |
+| 43 | SUBSTATUS | 60 | Pump post running |
+
+Burner off, fan at 0, ionisation 0, pump at 30 %, calorifier 65.8 C - it had been
+charging the tank, shut down, and gone into blocking. Byte 63 was 0, so the `0x01`
+re-lock had taken. Only one full sample survives in that log, so this does not
+strictly prove the board was not already blocking before 14:23:14; the write is
+simply the obvious suspect, fourteen seconds upstream.
+
+What the PCU objected to is not the bytes. The image that went back differs from
+the one the boiler had been running on by exactly one byte, and the component's own
+sanity check - 58 parameters against the ranges below - passed on every block as it
+was read, so nothing implausible was handed back. The whole image as read is kept
+in `pcu05_p3_live_parameters.md`. So the fault is not *what* changed but that
+something changed without whatever else the PCU expects to see change with it.
+
+The obvious candidate was a checksum. Bytes 124..127 of the image are
+`FF FF 85 9A`, past the last documented parameter (p124 at byte 123), and `85 9A`
+has the shape of a 16-bit trailer. It is not one, or not by any usual reckoning:
+CRC-16 with polynomials `A001`, `8408`, `8005`, `1021` and `3D65`, both bit orders,
+inits `0000` and `FFFF`, plus 16-bit sums, over **every** contiguous range of the
+128 bytes, produces `859A`/`9A85` only from ranges like `[5,127)` and `[63,89)` -
+coincidences, not a checksum anybody would store. If the PCU keeps a consistency
+value for the parameter set, it is not in those four bytes.
+
+That leaves the two things Recom does around a write that this component still does
+not: `IDENTIFICATION` (`0x01`/`0x0B`) on connect, and `SERVICE_CODE` (`0x37`). It
+also leaves the possibility that a parameter write is only legitimate with the
+boiler in standby rather than mid-DHW-charge. Untested, both.
+
+Blocking is not locking: a blocking code clears when its cause does.
+
+### A re-lock that goes unanswered is not a failed write
+
+The same transaction reported `parameter write failed` even though the write above
+had already verified. Two mistakes, both since fixed:
+
+- The step that actually timed out was `CODE_SERVICE_STOP -> 0x00`, and the log
+  called it `sample`, because the label switch in `handle_response_()` had no case
+  for either `_EE` request and fell through to the default.
+- `finish_txn_()` tested `txn_failed_` before `txn_wrote_`, so a stumble on a step
+  that runs *after* the write and its read-back discarded the verify, printed a
+  failure, and left `params_` holding the pre-write value - which is why Home
+  Assistant went on showing p33 = 4 with 6 in the EEPROM.
+
+A re-lock failure is now tracked apart from the rest of the transaction and
+reported on its own, after the verdict on the write. It is also the one step that
+gets resent: `CODE_SERVICE_STOP` carries no payload and re-locking an already
+locked address is a no-op, so a repeat costs nothing, while walking away from an
+unanswered one leaves the boiler unlocked. Reads and writes are still never
+retried.
+
 ### What the component implements
 
 Write support now exists in `components/dietrich/dietrich.cpp`, built to this

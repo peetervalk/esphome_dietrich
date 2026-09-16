@@ -341,6 +341,13 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // live for as long as a transaction is on the bus
   bool txn_active_{false};
   bool txn_failed_{false};
+  // Kept apart from txn_failed_ on purpose. The re-lock steps are last in the
+  // queue, so by the time one of them goes wrong the write and its read-back
+  // have already happened and their verdict still stands. Folding the two
+  // together reported a verified write as a failure and threw the verify away.
+  bool txn_relock_failed_{false};
+  // resends of the re-lock step currently in hand; reset on every step
+  uint8_t txn_relock_tries_{0};
   bool txn_wrote_{false};  // at least one write was ACKed, so a verify is meaningful
   DietrichTxn txn_kind_{DIETRICH_TXN_NONE};
   uint8_t txn_first_block_{DIETRICH_PARAM_FIRST_BLOCK};

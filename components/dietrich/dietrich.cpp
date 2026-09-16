@@ -98,6 +98,12 @@ static const uint32_t WRITE_TIMEOUT_MS = 1000;
 static const uint32_t RX_QUIET_MS = 40;
 // settle time between two requests of the same cycle
 static const uint32_t INTER_REQUEST_MS = 60;
+// Resends allowed for a re-lock step that goes unanswered. Only the re-lock gets
+// them: CODE_SERVICE_STOP carries no payload and re-locking an address that is
+// already locked is a no-op, so a repeat costs nothing, while walking away from
+// an unanswered one leaves the boiler unlocked. A read or a write is not retried
+// - see the note on Recom's timed-out writes in mapping/pcu05_p3_protocol.md.
+static const uint8_t RELOCK_RETRIES = 1;
 // Parameters are configuration, not measurements - re-read them roughly hourly
 // (240 x the default 15s poll) so a service-tool edit shows up without a reboot.
 static const int PARAM_REFRESH_CYCLES = 240;
@@ -956,6 +962,8 @@ void Dietrich::start_txn_() {
   this->pending_txn_ = DIETRICH_TXN_NONE;
   this->txn_active_ = true;
   this->txn_failed_ = false;
+  this->txn_relock_failed_ = false;
+  this->txn_relock_tries_ = 0;
   this->txn_wrote_ = false;
   this->txn_blocks_read_ = 0;
   this->queue_pos_ = 0;
@@ -1031,9 +1039,6 @@ void Dietrich::finish_txn_() {
 
   if (this->txn_failed_) {
     ESP_LOGE(TAG, "%s failed; service mode was re-locked, nothing was retried", kind);
-    // The re-lock's own reply may be what failed, in which case we do not know
-    // the boiler is locked. Re-arm the boot check so the next sample settles it.
-    this->seen_sample_ = false;
   } else if (this->txn_wrote_) {
     // txn_read_ now holds the verify reads, txn_image_ what the boiler was told
     const size_t lo =
@@ -1065,8 +1070,21 @@ void Dietrich::finish_txn_() {
     ESP_LOGI(TAG, "%s finished, nothing was written", kind);
   }
 
+  // Reported separately, and after the verdict above, because it says nothing
+  // about the write: a re-lock is the last thing in the queue. What it does say
+  // is that an address may still be unlocked, so re-arm the boot check. That
+  // check only watches sample byte 63, which tracks 0x01 - an unanswered re-lock
+  // at 0x00 leaves nothing behind that this component can see.
+  if (this->txn_relock_failed_) {
+    ESP_LOGE(TAG, "%s: a re-lock went unanswered after %u resend(s); an address may still be unlocked", kind,
+             static_cast<unsigned>(RELOCK_RETRIES));
+    this->seen_sample_ = false;
+  }
+
   this->txn_active_ = false;
   this->txn_failed_ = false;
+  this->txn_relock_failed_ = false;
+  this->txn_relock_tries_ = 0;
   this->txn_wrote_ = false;
   this->txn_blocks_read_ = 0;
   this->txn_kind_ = DIETRICH_TXN_NONE;
@@ -1095,6 +1113,15 @@ bool Dietrich::handle_response_() {
         break;
       case DIETRICH_REQ_SERVICE_OFF:
         what = "service mode off";
+        break;
+      // Without these two the EEPROM address's own unlock and re-lock fell
+      // through to "sample" below, so the log named the wrong request at exactly
+      // the moment one of them went unanswered.
+      case DIETRICH_REQ_SERVICE_ON_EE:
+        what = "service mode on (EEPROM)";
+        break;
+      case DIETRICH_REQ_SERVICE_OFF_EE:
+        what = "service mode off (EEPROM)";
         break;
       default:
         what = "sample";
@@ -1238,14 +1265,27 @@ void Dietrich::poll_response_() {
     return;
 
   const bool ok = this->handle_response_();
-  if (this->txn_active_ && !ok)
-    this->txn_failed_ = true;
+  if (this->txn_active_ && !ok) {
+    if (this->queue_pos_ >= this->txn_relock_pos_) {
+      if (this->txn_relock_tries_ < RELOCK_RETRIES) {
+        this->txn_relock_tries_++;
+        ESP_LOGW(TAG, "re-lock got no usable reply, sending it again");
+        this->next_send_time_ = millis() + INTER_REQUEST_MS;
+        this->state_machine_ = DIETRICH_SEND;
+        return;
+      }
+      this->txn_relock_failed_ = true;
+    } else {
+      this->txn_failed_ = true;
+    }
+  }
   this->advance_();
 }
 
 // Jump to the re-lock, which start_txn_() always puts last in the queue. Used
 // both for a step that failed and for a write that turned out to be unnecessary.
 void Dietrich::skip_to_relock_() {
+  this->txn_relock_tries_ = 0;
   if (this->queue_len_ > 0)
     this->queue_pos_ = this->txn_relock_pos_ < this->queue_len_ ? this->txn_relock_pos_
                                                                 : static_cast<uint8_t>(this->queue_len_ - 1);
@@ -1264,6 +1304,7 @@ void Dietrich::advance_() {
     return;
   }
 
+  this->txn_relock_tries_ = 0;  // the resend budget is per step, not per transaction
   this->queue_pos_++;
   if (this->queue_pos_ >= this->queue_len_) {
     if (this->txn_active_)

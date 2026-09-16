@@ -78,6 +78,10 @@ struct FakeBoiler {
   bool answer_reads{true};
   bool answer_writes{true};
   bool answer_service{true};
+  // CODE_SERVICE_STOP frames whose reply is swallowed on the way back. The board
+  // acts on them; only the ACK is lost. A PCU-05 P3 did exactly this to the
+  // re-lock at 0x00 on 2026-09-16, after a write that had already verified.
+  int drop_service_off{0};
   // enforce what Recom's sequence implies: no EEPROM write while locked
   bool require_service_for_write{true};
   // CODE_SERVICE_START is ACKed but does not actually unlock
@@ -102,6 +106,7 @@ struct FakeBoiler {
     eeprom_addr = 0x00;
     service_mode = service_mode_ee = false;
     answer_reads = answer_writes = answer_service = true;
+    drop_service_off = 0;
     require_service_for_write = true;
     service_mode_engages = true;
     writes_take_effect = true;
@@ -206,6 +211,10 @@ struct FakeBoiler {
         service_mode_ee = false;
       else
         service_mode = false;
+      if (drop_service_off > 0) {
+        drop_service_off--;
+        return;  // acted on, but the ACK never arrives
+      }
       if (answer_service)
         respond(src, dst, cmd, ext, nullptr, 0);
       return;
@@ -359,6 +368,37 @@ int main() {
     delete d;
   }
 
+  // -- 3d. the re-lock reply is lost once: resent, and the write still stands -
+  {
+    begin("re-lock reply lost once");
+    auto *d = make();
+    g_boiler.drop_service_off = 1;  // the EEPROM address's re-lock, as seen live
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 800);
+    check(g_boiler.eeprom[2][0] == 6, "p33 was written");
+    check(logged("re-lock got no usable reply, sending it again"), "the re-lock was resent");
+    check(g_boiler.service_off == 3, "three CODE_SERVICE_STOP frames: the resend plus one per address");
+    check(logged("parameter write verified: 8 block(s) from 0x14"), "still reported as verified");
+    check(!logged("parameter write failed"), "not reported as a failure");
+    check(!g_boiler.service_mode && !g_boiler.service_mode_ee, "both addresses left locked");
+    delete d;
+  }
+
+  // -- 3e. the re-lock stays unanswered: reported, but the verify still counts -
+  {
+    begin("re-lock reply lost for good");
+    auto *d = make();
+    g_boiler.drop_service_off = 2;  // both attempts at the EEPROM address
+    check(d->write_param(33, 6), "request accepted");
+    pump(*d, 800);
+    check(g_boiler.eeprom[2][0] == 6, "p33 was written");
+    check(logged("parameter write verified: 8 block(s) from 0x14"),
+          "a verified write survives a re-lock that went wrong after it");
+    check(!logged("parameter write failed"), "the write is not what failed, so it is not called a failure");
+    check(logged("an address may still be unlocked"), "the re-lock is reported on its own");
+    delete d;
+  }
+
   // -- 3b. the reads land on the device that does not hold the image ---------
   {
     begin("reads answered by the wrong device (FF for every block)");
@@ -483,7 +523,9 @@ int main() {
     check(d->write_param(33, 9), "request accepted");
     pump(*d, 800);
     check(g_boiler.writes == 0, "no write attempted");
-    check(g_boiler.service_off == 2, "both re-locks attempted anyway");
+    // two addresses, and a re-lock that goes unanswered is resent once
+    check(g_boiler.service_off == 4, "both re-locks attempted anyway, each resent once");
+    check(logged("an address may still be unlocked"), "the unanswered re-locks are reported");
     delete d;
   }
 
