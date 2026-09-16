@@ -93,6 +93,16 @@ struct FakeBoiler {
   int reads{0}, writes{0}, service_on{0}, service_off{0}, rejected_writes{0};
   int idents{0};
   std::vector<uint8_t> ident_dests;  // the address each IDENTIFICATION was sent to
+  // Data bytes each address answers IDENTIFICATION with: 16 is the per-device
+  // layout a PCU-05 P3 really returned at 0x01, 64 the appliance layout that
+  // carries dF/dU, 0 silence. 0x00 was silent on the live board.
+  int ident_len_pcu{16};
+  int ident_len_psu{0};
+  // Everything outside 0x14..0x1F, which no map covers. 0xFF except where a test
+  // plants something; block 0x05 carries a string so the dump's ASCII column has
+  // something to render.
+  uint8_t rest[128][16]{};
+  int silent_block{-1};  // this block answers nothing, as an absent one would
   std::vector<uint8_t> read_dests;  // the address each READ_EPROM_BLOCK was sent to
   std::vector<std::vector<uint8_t>> written_frames;
   std::deque<uint8_t> tx;  // bytes heading for the ESP
@@ -115,6 +125,11 @@ struct FakeBoiler {
     reads = writes = service_on = service_off = rejected_writes = 0;
     idents = 0;
     ident_dests.clear();
+    ident_len_pcu = 16;
+    ident_len_psu = 0;
+    memset(rest, 0xFF, sizeof(rest));
+    memcpy(rest[0x05], "PCU05P3TESTBLOCK", 16);
+    silent_block = -1;
     read_dests.clear();
     written_frames.clear();
     tx.clear();
@@ -166,22 +181,29 @@ struct FakeBoiler {
     if (cmd == 0x01) {  // IDENTIFICATION
       idents++;
       ident_dests.push_back(dst);
-      // group 1 of the `identification` node: 64 bytes, its own layout, with two
-      // 16 character strings at 32 and 48. The values are made up; the offsets are not.
-      uint8_t id[64]{};
-      id[0] = 0x05;   // device type
-      id[1] = 7;      // dF-code
-      id[2] = 12;     // dU-code
-      id[5] = 0x1A;   // software version
-      id[6] = 0x03;   // parameter version
-      id[7] = 0x01;   // parameter type
-      id[10] = 4;     // next service code
-      id[16] = 0x02;  // connected PSU type
-      id[17] = 0x05;  // connected PCU type
-      id[18] = 0x00;  // SCU-C
-      memcpy(id + 32, "0123456789AB    ", 16);
-      memcpy(id + 48, "PCU-05 TEST     ", 16);
-      respond(src, dst, cmd, ext, id, sizeof(id));
+      const int len = dst == 0x00 ? ident_len_psu : ident_len_pcu;
+      if (len == 16) {
+        // Byte for byte what a PCU-05 P3 answered at 0x01 on 2026-09-16 15:28:
+        // groups 2-4's per-device layout, with the serial number unset.
+        static const uint8_t REAL[16] = {0x05, 0x17, 0xFF, 0x03, 0x6E, 0x8C, 0x01, 0x04,
+                                         0x01, 0x24, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        respond(src, dst, cmd, ext, REAL, sizeof(REAL));
+      } else if (len == 64) {
+        // group 1, the appliance layout. Synthetic - no board has served it yet -
+        // but the offsets are the map's.
+        uint8_t id[64]{};
+        id[1] = 7;      // dF-code
+        id[2] = 12;     // dU-code
+        id[5] = 0x1A;   // software version
+        id[6] = 0x03;   // parameter version
+        id[7] = 0x01;   // parameter type
+        id[10] = 4;     // next service code
+        id[16] = 0x02;  // connected PSU type
+        id[17] = 0x05;  // connected PCU type
+        memcpy(id + 32, "0123456789AB    ", 16);
+        memcpy(id + 48, "PCU-05 TEST     ", 16);
+        respond(src, dst, cmd, ext, id, sizeof(id));
+      }
       return;
     }
     if (cmd == 0x10) {  // READ_EPROM_BLOCK
@@ -189,8 +211,12 @@ struct FakeBoiler {
       read_dests.push_back(dst);
       if (!answer_reads)
         return;
-      if (ext < 0x14 || ext > 0x1F)
+      if (silent_block >= 0 && ext == silent_block)
         return;
+      if (ext < 0x14 || ext > 0x1F) {
+        respond(src, dst, cmd, ext, rest[ext], 16);
+        return;
+      }
       respond(src, dst, cmd, ext, dst == eeprom_addr ? eeprom[ext - 0x14] : stray[ext - 0x14], 16);
       return;
     }
@@ -621,14 +647,17 @@ int main() {
     begin("identification on connect");
     auto *d = make();
     d->update();
-    pump(*d, 150);
-    check(g_boiler.idents == 1, "IDENTIFICATION sent on the very first poll, as Recom opens with");
-    check(g_boiler.ident_dests.size() == 1 && g_boiler.ident_dests[0] == 0x01, "addressed to the PCU at 0x01");
-    check(logged("dF-code 7, dU-code 12"), "the plate codes are decoded");
-    check(logged("software version 26, parameter version 3, parameter type 1"), "versions decoded, raw");
-    check(logged("next service code 4, connected PSU type 2, connected PCU type 5"), "connected devices decoded");
-    check(logged("serial number: 0123456789AB"), "serial read as text, padding trimmed");
-    check(logged("boiler name: PCU-05 TEST"), "boiler name read as text, padding trimmed");
+    pump(*d, 200);
+    check(g_boiler.idents == 2, "IDENTIFICATION sent on the very first poll, as Recom opens with");
+    check(g_boiler.ident_dests == std::vector<uint8_t>({0x01, 0x00}), "both addresses asked, PCU first");
+    // the per-device layout, decoded off the live capture in the fake boiler
+    check(logged("device type 5, software version 23, parameter version 255, type 3"), "versions decoded");
+    check(logged("operating hours 56600, connected SU type 1, connected PSU type 4"),
+          "operating hours use the PCU's x2 scaling, and the connected device is named for the address");
+    check(logged("last blocking code 1, last locking code 36"), "the stored fault history is decoded");
+    check(logged("serial number (raw): FF FF FF FF FF"), "the 5 byte serial goes out raw, not guessed at");
+    check(!logged("dF-code"), "no dF/dU claimed from a reply that does not carry it");
+    check(logged("no response to identification 0x00 request"), "the silent address is reported, not decoded");
     check(g_boiler.writes == 0 && g_boiler.service_on == 0, "read-only: nothing written, never unlocked");
 
     g_log.clear();
@@ -636,25 +665,39 @@ int main() {
       d->update();
       pump(*d, 120);
     }
-    check(g_boiler.idents == 1, "not asked again on later polls");
+    check(g_boiler.idents == 2, "not asked again on later polls");
     delete d;
   }
 
-  // -- 13b. asking for it again ----------------------------------------------
+  // -- 13b. the appliance layout, wherever it turns up ------------------------
+  {
+    begin("identification, appliance layout");
+    auto *d = make();
+    g_boiler.ident_len_psu = 64;  // as if 0x00 served group 1
+    d->update();
+    pump(*d, 200);
+    check(logged("dF-code 7, dU-code 12"), "the plate codes are decoded from the long reply");
+    check(logged("serial number: 0123456789AB"), "serial read as text, padding trimmed");
+    check(logged("boiler name: PCU-05 TEST"), "boiler name read as text, padding trimmed");
+    check(logged("device type 5"), "and the short reply from 0x01 is still decoded its own way");
+    delete d;
+  }
+
+  // -- 13c. asking for it again ----------------------------------------------
   {
     begin("identification on request");
     auto *d = make();
     d->update();
-    pump(*d, 150);  // the one on connect
+    pump(*d, 200);  // the pair on connect
     check(d->read_identification(), "request accepted");
     check(logged("identification queued"), "acceptance reported");
     d->update();
-    pump(*d, 150);
-    check(g_boiler.idents == 2, "asked a second time");
+    pump(*d, 200);
+    check(g_boiler.idents == 4, "both addresses asked a second time");
     delete d;
   }
 
-  // -- 13c. not on a variant whose layout this is not ------------------------
+  // -- 13d. not on a variant whose layout this is not ------------------------
   {
     begin("identification is gated on the variant");
     auto *e = new Dietrich();
@@ -665,6 +708,41 @@ int main() {
     pump(*e, 150);
     check(g_boiler.idents == 0, "and never sent unasked either");
     delete e;
+  }
+
+  // -- 14. EEPROM dump: a read-only sweep of the unmapped blocks -------------
+  {
+    begin("eeprom dump");
+    auto *d = make();
+    g_boiler.silent_block = 0x03;
+    check(d->dump_eeprom(0x00, 0x00, 16), "request accepted");
+    check(logged("blocks 0x00..0x0F, read-only"), "the range is reported");
+    d->update();
+    pump(*d, 1500);
+    check(g_boiler.reads == 16, "every block in the range was asked for, exactly once");
+    check(logged("eeprom 00:05"), "blocks are logged by address and index");
+    check(logged("|PCU05P3TESTBLOCK|"), "the ASCII column renders a string in an unmapped block");
+    check(logged("no response to eeprom 0x03 request"), "a silent block is reported");
+    check(logged("eeprom 00:04"), "and stepped over rather than ending the sweep");
+    check(logged("eeprom dump of 0x00 finished"), "completion reported");
+    check(g_boiler.writes == 0 && g_boiler.service_on == 0, "read-only: nothing written, never unlocked");
+    delete d;
+  }
+
+  // -- 14b. the dump keeps out of the way ------------------------------------
+  {
+    begin("eeprom dump gates");
+    auto *d = make();
+    check(!d->dump_eeprom(0x02, 0, 4), "a device address that is not 0x00 or 0x01 is refused");
+    check(logged("is not a device address"), "refusal explains why");
+
+    g_log.clear();
+    check(d->write_param(33, 6), "a write is staged");
+    check(!d->dump_eeprom(0x00, 0, 4), "and the dump refuses to share the bus with it");
+    check(logged("the bus is busy"), "refusal explains why");
+    pump(*d, 900);
+    check(g_boiler.eeprom[2][0] == 6, "the write still completed undisturbed");
+    delete d;
   }
 
   printf("\n%s (%d failed)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);

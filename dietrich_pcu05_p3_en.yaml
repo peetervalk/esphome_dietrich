@@ -264,6 +264,46 @@ sensor:
     name: "Boiler Uptime"
 
 # ---------------------------------------------------------------------------
+# Read-only diagnostics
+#
+# These are live, not commented out, because none of them writes anything or
+# touches service mode: READ_EPROM_BLOCK and IDENTIFICATION are plain reads, so
+# they work with `allow_writes` off and cannot disturb the boiler. As with the
+# write path, the lambda is compiled in - Home Assistant only sends "press".
+# ---------------------------------------------------------------------------
+button:
+  # Who both devices think they are. Sent once at boot anyway; this asks again.
+  # 0x01 answers the 16 byte per-device layout - device type, versions,
+  # operating hours, connected device types and the last blocking and locking
+  # codes. The 64 byte appliance layout carrying the dF/dU codes has not been
+  # seen from either address; see mapping/pcu05_p3_protocol.md.
+  - platform: template
+    name: "Boiler identification"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(boiler).read_identification();'
+
+  # Walk the whole 2 KB EEPROM and log every block, hex and ASCII. 128 blocks at
+  # roughly a third of a second each, so about 45 seconds, and it borrows the
+  # poll intervals it needs. Only 0x14..0x1B (parameters) and 0x1C..0x1F
+  # (counters) are mapped - the other 108 blocks are where the appliance
+  # identification and the fault history records have to be. The history records
+  # are 16 bytes each, exactly one block, and carry an operating-hours stamp.
+  - platform: template
+    name: "Boiler dump EEPROM 0x00"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(boiler).dump_eeprom(0x00, 0x00, 128);'
+
+  # The same sweep of the other device. The two answer READ_EPROM_BLOCK with
+  # different contents - 0x00 holds the parameter image the boiler runs on.
+  - platform: template
+    name: "Boiler dump EEPROM 0x01"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(boiler).dump_eeprom(0x01, 0x00, 128);'
+
+# ---------------------------------------------------------------------------
 # Bring-up buttons for the write path
 #
 # Commented out along with `allow_writes` above - uncomment both together. Work

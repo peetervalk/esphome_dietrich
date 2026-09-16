@@ -74,15 +74,20 @@ static const uint8_t CMD_SERVICE_OFF_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08,
 static const uint8_t CMD_SERVICE_ON_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x08, 0x0C, 0x93, 0x0E, 0x03};
 static const uint8_t CMD_SERVICE_OFF_REMEHA_EE[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x1F, 0x0C, 0x9C, 0xFE, 0x03};
 
-// IDENTIFICATION, COMMAND 0x01 with EXT_COMMAND 0x0B, addressed to the PCU at
-// 0x01. Recom sends this when it connects, before anything else. It is a plain
-// read: no service mode, no payload, nothing written.
+// IDENTIFICATION, COMMAND 0x01 with EXT_COMMAND 0x0B. Recom sends this when it
+// connects, before anything else. It is a plain read: no service mode, no payload,
+// nothing written.
 //
-// The reply is the `identification` node of PCU-05_P3.xml, group 1 - a different
-// 64 byte layout from the sample, decoded in decode_identification_(). Groups 2-4
-// of that node describe the SU, PSU and SCU, which answer the same command at
-// their own addresses; only the PCU's own group is read here.
-static const uint8_t CMD_IDENT_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x01, 0x0B, 0xE9, 0x5C, 0x03};
+// The `identification` node of PCU-05_P3.xml holds four layouts. Groups 2, 3 and 4
+// are one device's own identity - device type, versions, operating hours, connected
+// device types, last blocking and locking codes - and a PCU-05 P3 answers at 0x01
+// with exactly that, 16 data bytes, group 2's shape. Group 1 is the appliance
+// identity instead, 64 bytes, and it is the only one carrying the dF/dU codes, the
+// serial number and the boiler name. Nothing says which device serves it, so both
+// addresses are asked and the reply is decoded by its length. See
+// mapping/pcu05_p3_protocol.md.
+static const uint8_t CMD_IDENT_REMEHA_PCU[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x01, 0x0B, 0xE9, 0x5C, 0x03};
+static const uint8_t CMD_IDENT_REMEHA_PSU[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x01, 0x0B, 0xD4, 0x9C, 0x03};
 
 // Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
 static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
@@ -540,9 +545,20 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
       *cmd = CMD_SERVICE_OFF_REMEHA_EE;
       *len = sizeof(CMD_SERVICE_OFF_REMEHA_EE);
       break;
-    case DIETRICH_REQ_IDENT:
-      *cmd = CMD_IDENT_REMEHA;
-      *len = sizeof(CMD_IDENT_REMEHA);
+    case DIETRICH_REQ_IDENT_PCU:
+      *cmd = CMD_IDENT_REMEHA_PCU;
+      *len = sizeof(CMD_IDENT_REMEHA_PCU);
+      break;
+    case DIETRICH_REQ_IDENT_PSU:
+      *cmd = CMD_IDENT_REMEHA_PSU;
+      *len = sizeof(CMD_IDENT_REMEHA_PSU);
+      break;
+    case DIETRICH_REQ_DUMP:
+      // built per block by build_read_frame_(), just before it is sent, the same
+      // way a write frame is - so response_error_() checks the echoed block index
+      // against it for free
+      *cmd = this->tx_buf_;
+      *len = DIETRICH_READ_FRAME_LEN;
       break;
     case DIETRICH_REQ_COUNTER1:
       *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
@@ -737,36 +753,80 @@ std::string Dietrich::text_(size_t off, size_t len) const {
   return out;
 }
 
-// The `identification` node of PCU-05_P3.xml, group 1 - the PCU's own answer, and
-// a different 64 byte layout from the sample. Groups 2-4 of that node belong to the
-// SU, PSU and SCU, which answer the same command at their own addresses.
+// The `identification` node of PCU-05_P3.xml. Which of its four layouts a reply
+// carries is decided by how long the reply is, because nothing in the map says
+// which device serves which group, and a PCU-05 P3 turned out not to serve the one
+// the field names suggest:
 //
-// Logged rather than published: this is commissioning data to be read once against
-// the identification plate, not a measurement. The dF and dU codes are the ones the
-// plate carries and the ones a factory-settings restore asks for - they live here,
-// not in the parameter block, so no parameter write can disturb them. See
-// mapping/pcu05_p3_protocol.md.
-void Dietrich::decode_identification_() {
-  if (!this->have_(18, 1)) {
-    ESP_LOGW(TAG, "identification reply carries only %u data bytes, too short to decode",
-             static_cast<unsigned>(this->data_len_));
+//   groups 2-4, 16 data bytes: one device's own identity. What 0x01 actually
+//     answers with - device type, versions, operating hours, connected device
+//     types, last blocking and locking codes, and a 5 byte serial number.
+//   group 1, 64 data bytes: the appliance identity - dF/dU codes, a 16 character
+//     serial number and the boiler name. Not observed yet from either address.
+//
+// Logged rather than published: commissioning data, read once against the
+// identification plate, not a measurement.
+void Dietrich::decode_identification_(uint8_t addr) {
+  // group 1 is the only layout with anything at byte 48, so its length gives it away
+  if (this->have_(48, 16)) {
+    ESP_LOGI(TAG, "identification 0x%02X: dF-code %u, dU-code %u (compare these with the identification plate)",
+             static_cast<unsigned>(addr), static_cast<unsigned>(this->d_(1)), static_cast<unsigned>(this->d_(2)));
+    ESP_LOGI(TAG, "  software version %u, parameter version %u, parameter type %u (raw bytes)",
+             static_cast<unsigned>(this->d_(5)), static_cast<unsigned>(this->d_(6)),
+             static_cast<unsigned>(this->d_(7)));
+    ESP_LOGI(TAG, "  next service code %u, connected PSU type %u, connected PCU type %u, SCU-C %u",
+             static_cast<unsigned>(this->d_(10)), static_cast<unsigned>(this->d_(16)),
+             static_cast<unsigned>(this->d_(17)), static_cast<unsigned>(this->d_(18)));
+    ESP_LOGI(TAG, "  serial number: %s", this->text_(32, 16).c_str());
+    ESP_LOGI(TAG, "  boiler name: %s", this->text_(48, 16).c_str());
     return;
   }
 
-  ESP_LOGI(TAG, "identification: dF-code %u, dU-code %u (compare these with the identification plate)",
-           static_cast<unsigned>(this->d_(1)), static_cast<unsigned>(this->d_(2)));
-  // SW_VERSION and PARAM_VERSION carry Recom's display format 6, which is not
-  // recovered, so they go out raw rather than guessed at.
-  ESP_LOGI(TAG, "  software version %u, parameter version %u, parameter type %u (raw bytes)",
-           static_cast<unsigned>(this->d_(5)), static_cast<unsigned>(this->d_(6)),
+  if (!this->have_(10, 1)) {
+    ESP_LOGW(TAG, "identification 0x%02X carries only %u data bytes, too short to decode",
+             static_cast<unsigned>(addr), static_cast<unsigned>(this->data_len_));
+    return;
+  }
+
+  // Operating hours is `(A.1 + B.0) x N`, the same big-endian pair the counter
+  // blocks use, and N is the one difference between group 2 and group 3: the PCU
+  // counts in twos, the SU and PSU in eights. The address is what tells them apart.
+  const bool pcu = addr == 0x01;
+  const uint32_t hours = static_cast<uint32_t>((this->d_(4) << 8) | this->d_(5)) * (pcu ? 2u : 8u);
+  ESP_LOGI(TAG, "identification 0x%02X: device type %u, software version %u, parameter version %u, type %u",
+           static_cast<unsigned>(addr), static_cast<unsigned>(this->d_(0)), static_cast<unsigned>(this->d_(1)),
+           static_cast<unsigned>(this->d_(2)), static_cast<unsigned>(this->d_(3)));
+  ESP_LOGI(TAG, "  operating hours %u, connected %s type %u, connected PSU type %u",
+           static_cast<unsigned>(hours), pcu ? "SU" : "PCU", static_cast<unsigned>(this->d_(6)),
            static_cast<unsigned>(this->d_(7)));
-  ESP_LOGI(TAG, "  next service code %u, connected PSU type %u, connected PCU type %u, SCU-C %u",
-           static_cast<unsigned>(this->d_(10)), static_cast<unsigned>(this->d_(16)),
-           static_cast<unsigned>(this->d_(17)), static_cast<unsigned>(this->d_(18)));
-  if (this->have_(32, 16))
-    ESP_LOGI(TAG, "  serial number: %s", this->text_(32, 16).c_str());
-  if (this->have_(48, 16))
-    ESP_LOGI(TAG, "  boiler name: %s", this->text_(48, 16).c_str());
+  // "Last" as the map names them: the previous fault, not the one in the sample.
+  ESP_LOGI(TAG, "  last blocking code %u, last locking code %u", static_cast<unsigned>(this->d_(8)),
+           static_cast<unsigned>(this->d_(9)));
+  if (this->have_(16, 0)) {
+    // Serial number is `number="5"` at byte 11 - five bytes in a format the IL does
+    // not give up, so it goes out as hex rather than guessed at. All FF means unset.
+    ESP_LOGI(TAG, "  serial number (raw): %02X %02X %02X %02X %02X", this->d_(11), this->d_(12), this->d_(13),
+             this->d_(14), this->d_(15));
+  }
+}
+
+// Hex and ASCII, one line per block. The ASCII column is the point: a boiler name
+// or a serial number is what an unmapped block would give itself away by.
+void Dietrich::log_eeprom_block_() const {
+  size_t n = this->data_len_;
+  if (n > DIETRICH_PARAM_BLOCK_SIZE)
+    n = DIETRICH_PARAM_BLOCK_SIZE;
+
+  char ascii[DIETRICH_PARAM_BLOCK_SIZE + 1];
+  for (size_t i = 0; i < n; i++) {
+    const uint8_t c = this->d_(i);
+    ascii[i] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '.';
+  }
+  ascii[n] = 0;
+
+  ESP_LOGI(TAG, "eeprom %02X:%02X %s |%s|", static_cast<unsigned>(this->dump_addr_),
+           static_cast<unsigned>(this->dump_block_),
+           hex_str_(this->rx_buf_ + this->header_len_(), n).c_str(), ascii);
 }
 
 void Dietrich::pub_param_(sensor::Sensor *s, size_t off, float scale) {
@@ -824,6 +884,22 @@ uint8_t Dietrich::block_of_(DietrichRequest req) {
 //
 // The payload comes from txn_image_, which begin_write_phase_() assembled out of
 // the blocks this transaction read for itself plus the one staged edit.
+// 02 | FE | addr | 05 | 08 | 10 | blk | CRClo CRChi | 03
+void Dietrich::build_read_frame_(uint8_t addr, uint8_t block) {
+  this->tx_buf_[0] = 0x02;
+  this->tx_buf_[1] = 0xFE;  // sender: the PC
+  this->tx_buf_[2] = addr;
+  this->tx_buf_[3] = 0x05;  // request
+  this->tx_buf_[4] = static_cast<uint8_t>(DIETRICH_READ_FRAME_LEN - 2);
+  this->tx_buf_[5] = 0x10;  // READ_EPROM_BLOCK
+  this->tx_buf_[6] = block;
+
+  const uint16_t crc = crc16_(this->tx_buf_, 1, DIETRICH_READ_FRAME_LEN - 3);
+  this->tx_buf_[DIETRICH_READ_FRAME_LEN - 3] = static_cast<uint8_t>(crc & 0xFF);
+  this->tx_buf_[DIETRICH_READ_FRAME_LEN - 2] = static_cast<uint8_t>(crc >> 8);
+  this->tx_buf_[DIETRICH_READ_FRAME_LEN - 1] = 0x03;
+}
+
 void Dietrich::build_write_frame_(uint8_t block) {
   const size_t base = (static_cast<size_t>(block) - DIETRICH_PARAM_FIRST_BLOCK) * DIETRICH_PARAM_BLOCK_SIZE;
 
@@ -963,6 +1039,36 @@ bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_co
   this->pending_byte_ = byte_offset;
   this->pending_value_ = value;
   ESP_LOGI(TAG, "%s queued", what);
+  return true;
+}
+
+bool Dietrich::dump_eeprom(uint8_t addr, uint8_t first, uint8_t count) {
+  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
+    ESP_LOGW(TAG, "eeprom dump is only supported on variant pcu05_p3");
+    return false;
+  }
+  if (addr != 0x00 && addr != 0x01) {
+    ESP_LOGW(TAG, "eeprom dump: 0x%02X is not a device address, use 0x00 or 0x01",
+             static_cast<unsigned>(addr));
+    return false;
+  }
+  if (this->dump_active_ || this->txn_active_ || this->pending_txn_ != DIETRICH_TXN_NONE) {
+    ESP_LOGW(TAG, "eeprom dump: the bus is busy, try again when it is not");
+    return false;
+  }
+  if (count == 0)
+    count = 1;
+
+  this->dump_addr_ = addr;
+  this->dump_block_ = first;
+  uint16_t end = static_cast<uint16_t>(first) + count;
+  if (end > DIETRICH_EEPROM_BLOCKS)
+    end = DIETRICH_EEPROM_BLOCKS;
+  this->dump_end_ = end;
+  this->dump_active_ = true;
+  ESP_LOGI(TAG, "eeprom dump of 0x%02X queued: blocks 0x%02X..0x%02X, read-only",
+           static_cast<unsigned>(addr), static_cast<unsigned>(first),
+           static_cast<unsigned>(end - 1));
   return true;
 }
 
@@ -1196,8 +1302,15 @@ bool Dietrich::handle_response_() {
       case DIETRICH_REQ_SERVICE_OFF_EE:
         what = "service mode off (EEPROM)";
         break;
-      case DIETRICH_REQ_IDENT:
-        what = "identification";
+      case DIETRICH_REQ_IDENT_PCU:
+        what = "identification 0x01";
+        break;
+      case DIETRICH_REQ_IDENT_PSU:
+        what = "identification 0x00";
+        break;
+      case DIETRICH_REQ_DUMP:
+        snprintf(param_what, sizeof(param_what), "eeprom 0x%02X", static_cast<unsigned>(this->dump_block_));
+        what = param_what;
         break;
       default:
         what = "sample";
@@ -1281,8 +1394,14 @@ bool Dietrich::handle_response_() {
     case DIETRICH_REQ_COUNTER2:
       this->decode_counter2_();
       break;
-    case DIETRICH_REQ_IDENT:
-      this->decode_identification_();
+    case DIETRICH_REQ_IDENT_PCU:
+      this->decode_identification_(0x01);
+      break;
+    case DIETRICH_REQ_IDENT_PSU:
+      this->decode_identification_(0x00);
+      break;
+    case DIETRICH_REQ_DUMP:
+      this->log_eeprom_block_();
       break;
     default:
       // service mode on/off carry no data; the validated ACK is the whole result
@@ -1304,6 +1423,8 @@ void Dietrich::send_request_() {
     if (blk == this->txn_first_block_ && !this->begin_write_phase_())
       return;
     this->build_write_frame_(blk);
+  } else if (req == DIETRICH_REQ_DUMP) {
+    this->build_read_frame_(this->dump_addr_, this->dump_block_);
   }
 
   // drop anything left over from a previous exchange
@@ -1373,6 +1494,20 @@ void Dietrich::skip_to_relock_() {
 }
 
 void Dietrich::advance_() {
+  // A dump is one request re-armed, not a queue - 128 blocks would not fit in one.
+  // A block that failed is stepped over rather than abandoning the sweep: which
+  // blocks a device declines is itself part of what a sweep is for.
+  if (this->dump_active_ && this->queue_[this->queue_pos_] == DIETRICH_REQ_DUMP) {
+    this->dump_block_++;
+    if (this->dump_block_ < this->dump_end_) {
+      this->next_send_time_ = millis() + INTER_REQUEST_MS;
+      this->state_machine_ = DIETRICH_SEND;
+      return;
+    }
+    this->dump_active_ = false;
+    ESP_LOGI(TAG, "eeprom dump of 0x%02X finished", static_cast<unsigned>(this->dump_addr_));
+  }
+
   // A failed step in a write transaction goes straight to the re-lock instead of
   // carrying on. Recom leaves service mode on when a write fails - it re-locks
   // only in the success branch, with no try/finally - and that is not a bug
@@ -1420,6 +1555,8 @@ void Dietrich::update() {
     // poll interval. Only a poll overrunning its own interval is worth a warning.
     if (this->txn_active_)
       ESP_LOGD(TAG, "write transaction in progress, skipping this poll interval");
+    else if (this->dump_active_)
+      ESP_LOGD(TAG, "eeprom dump in progress, skipping this poll interval");
     else
       ESP_LOGW(TAG, "previous poll still running, skipping this interval");
     return;
@@ -1437,10 +1574,14 @@ void Dietrich::update() {
   // Asked first, and once, the way Recom opens a connection with it. It borrows
   // one poll interval; the counter and parameter timers above keep counting, so
   // nothing else is skipped, only delayed by one.
-  if (this->pending_ident_) {
-    this->pending_ident_ = false;
-    this->queue_[0] = DIETRICH_REQ_IDENT;
+  if (this->dump_active_) {
+    this->queue_[0] = DIETRICH_REQ_DUMP;
     this->queue_len_ = 1;
+  } else if (this->pending_ident_) {
+    this->pending_ident_ = false;
+    this->queue_[0] = DIETRICH_REQ_IDENT_PCU;
+    this->queue_[1] = DIETRICH_REQ_IDENT_PSU;
+    this->queue_len_ = 2;
     // A parameter sweep is 8 requests, so give it a whole poll interval of its own
     // rather than appending it to the sample or counter cycle.
   } else if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->want_params_() &&

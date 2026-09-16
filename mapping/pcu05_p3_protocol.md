@@ -526,41 +526,137 @@ element of `PCU-05_P3.xml`. That is Recom's integrity value for the map file.
 
 #### Reading it
 
-`IDENTIFICATION` is a bare 10 byte request, COMMAND `0x01` with EXT `0x0B`,
-addressed to the PCU at `0x01`:
+`IDENTIFICATION` is a bare 10 byte request, COMMAND `0x01` with EXT `0x0B`. Both
+device addresses answer it:
 
 ```
 02 FE 01 05 08 01 0B E9 5C 03   # IDENTIFICATION -> 0x01
+02 FE 00 05 08 01 0B D4 9C 03   # IDENTIFICATION -> 0x00
 ```
 
-The reply carries 64 data bytes in the `identification` node's group 1 layout,
-which is nothing like the sample's:
+The `identification` node holds **four** layouts, and which one a reply carries has
+to be worked out from its length, because the map does not say which device serves
+which group. Groups 2, 3 and 4 are one device's own identity; group 1 is the
+appliance's, and it is the only one with the dF/dU codes on it.
 
-| Byte | Field | |
+| Byte | Groups 2-4 (16 bytes) | Group 1 (64 bytes) |
 |---|---|---|
-| 0 | Device type | |
-| 1 | **dF-code** | the identification-plate codes |
-| 2 | **dU-code** | |
-| 5 | Software version | Recom display format 6, not recovered - read raw |
-| 6 | Parameter version | as above |
-| 7 | Parameter type | |
-| 10 | Next service code | a `service.counter` selection |
-| 16 | Connected PSU type | |
-| 17 | Connected PCU type | |
-| 18 | SCU-C | |
-| 19..23 | SU no. | |
-| 24..31 | SCU-S no. | |
-| 32..47 | Serial number | 16 characters |
-| 48..63 | Boiler name | 16 characters |
+| 0 | Device type | - |
+| 1 | Software version | **dF-code** |
+| 2 | Parameter version | **dU-code** |
+| 3 | Parameter type | - |
+| 4..5 | Operating hours, `(A.1 + B.0) x N` | - |
+| 5 | - | Software version |
+| 6 | Connected SU type (g2) / PCU type (g3) | Parameter version |
+| 7 | Connected PSU type | Parameter type |
+| 8 | Last blocking code | - |
+| 9 | Last locking code | - |
+| 10 | Last internal error (g3 only) | Next service code |
+| 11..15 | Serial number, `number="5"` | - |
+| 16..18 | - | Connected PSU type, connected PCU type, SCU-C |
+| 19..31 | - | SU no., SCU-S no. |
+| 32..47 | - | Serial number, 16 characters |
+| 48..63 | - | Boiler name, 16 characters |
 
-Groups 2, 3 and 4 of the same node are the SU, PSU and SCU, which answer the same
-command at their own addresses with a shorter, differently shaped payload - device
-type at 0, versions at 1..3, operating hours at 4, last blocking and locking codes
-at 8 and 9. Only the PCU's own group is read here.
+`N` in the operating-hours expression is the one thing separating group 2 from
+group 3: `x 2` for the PCU, `x 8` for the SU and PSU. The pair is big-endian, the
+same way the counter blocks read.
 
-The component sends this once on the first poll after boot, as Recom does on
-connect, and `read_identification()` asks again. It is read-only and therefore not
+##### What the board actually answers
+
+`0x01` answers with **16 bytes, not 64** - groups 2-4's shape, not the group 1 the
+dF/dU field names might lead you to expect. Captured 2026-09-16 15:28:
+
+```
+0201FE06 18 010B 0517FF036E8C01040124FFFFFFFFFFFF 5EFC 03
+```
+
+| Field | Value |
+|---|---|
+| Device type | 5 |
+| Software version | 23 (`0x17`) |
+| Parameter version | **255** (`0xFF`) |
+| Parameter type | 3 |
+| Operating hours | `0x6E8C` x 2 = 56 600 |
+| Connected SU type | 1 |
+| Connected PSU type | 4 |
+| Last blocking code | 1 - *T Flow > max.* |
+| Last locking code | 36 - *5x Flame loss* |
+| Serial number | `FF FF FF FF FF`, unset |
+
+Two cross-checks that this is group 2 and not something else: byte 0 is defined
+only in groups 2-4, and 56 600 operating hours sits plausibly between the same
+board's *hours run pump* (62 222) and *power supply available* (64 832) counters,
+which it would not under group 3's `x 8`.
+
+`0x00` answered nothing at all, so **no address has yet served group 1**, and the
+dF/dU codes have not been read off this board over the wire. The identification
+plate remains the only source for them. Recom presumably gets group 1 somewhere -
+`CODE_FACTORY_COMMANDO` (`0x09`, EXT `0x52`) is the obvious place left to look.
+
+*Parameter version reads `0xFF`.* Worth writing down next to a `Blocking 0` (*PCU
+parameter fault*), and worth not reading too much into: there is no capture from
+before the write to compare it with, and an unset serial number in the same reply
+suggests `0xFF` is simply what this board stores for fields it does not fill in.
+
+The component sends both requests once on the first poll after boot, as Recom does
+on connect, and `read_identification()` asks again. Read-only, and therefore not
 gated behind `allow_writes`.
+
+### The rest of the EEPROM, and where group 1 has to be
+
+`EEPROMSize` in `PCU-05_P3.xml` is 2048 bytes, so the EEPROM is **128 blocks**,
+`0x00`..`0x7F`. Twelve of them are mapped - `0x14`..`0x1B` parameters, `0x1C`..`0x1F`
+counters - and the other 116 have never been read. Two things are known to exist
+and have no address yet, and both have to be in there:
+
+- **Group 1 of the `identification` node**: the dF/dU codes, the 16 character
+  serial number and the boiler name. `0x01` answers `IDENTIFICATION` with group 2
+  instead and `0x00` answers nothing, so no command is known to serve it.
+- **The fault history records.** The `error` (blocking) and `failure` (locking)
+  records in the field map are **16 bytes** each - exactly one EEPROM block, which
+  is a strong hint about how they are stored:
+
+| Byte | Blocking record | Locking record |
+|---|---|---|
+| 0 | Error code (`error.code`) | Error code (`failure.code`) |
+| 1 | Number - how many times | as blocking |
+| 2..3 | Operating hours, `(A.1 + B.0) x 2` | as blocking |
+| 4 | State (`status.code`) | as blocking |
+| 5 | Sub-State (`substatus.code`) | as blocking |
+| 6..9 | Flow, return, calorifier, outside temp, `sgn(A)` | as blocking |
+| 10 | Internal setpoint | as blocking |
+| 11 | Ionisation current, `A x 0.1` | as blocking |
+| 12..13 | Airflow, `A.1 + B.0` | as blocking |
+| 15 | Actual power, % | as blocking |
+
+That operating-hours stamp is the interesting column. The PCU reports 56 600
+operating hours in its identification reply, so a blocking record carrying a
+`0` error code and a stamp near 56 600 would date the `Blocking 0` to the hour -
+and either place it at the 2026-09-16 write or clear the write of it. The state,
+sub-state and temperatures at the time come with it.
+
+#### Last blocking code
+
+The identification reply's byte 8 is *Last blocking code* and read **1**
+(*T Flow > max.*) while the sample reported the current blocking as **0**. So the
+field is not a copy of the live status byte. Either it lags, or it records only
+faults that have cleared, or parameter faults do not go into it at all - the map
+does not say, and one reading cannot tell them apart. The history records above are
+what would settle it. The companion *Last locking code* read 36 (*5x Flame loss*),
+which suits a board with 139 flame losses and 261 failed starts on its counters.
+
+#### Sweeping it
+
+`dump_eeprom(addr, first, count)` walks a range of blocks and logs each one as hex
+and ASCII. `READ_EPROM_BLOCK` needs no service mode, so the sweep unlocks nothing
+and writes nothing; a block that answers nothing is logged and stepped over, since
+which blocks a device declines is itself part of what the sweep is for. It is one
+request re-armed rather than a queue - 128 blocks would not fit in one - and it
+borrows the poll intervals it needs, about 45 seconds for the full 2 KB.
+
+Both addresses are worth sweeping: they answer `READ_EPROM_BLOCK` with different
+contents, as `0x14`..`0x1B` already showed.
 
 ### A re-lock that goes unanswered is not a failed write
 

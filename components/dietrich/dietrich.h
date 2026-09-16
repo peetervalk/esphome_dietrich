@@ -34,9 +34,14 @@ enum DietrichRequest : uint8_t {
   // the same unlock and re-lock addressed to 0x00, where the parameter EEPROM is
   DIETRICH_REQ_SERVICE_ON_EE,
   DIETRICH_REQ_SERVICE_OFF_EE,
-  // read-only, and nothing to do with the write path - it is here because every
-  // request kind has to sort below DIETRICH_REQ_WRITE0
-  DIETRICH_REQ_IDENT,
+  // Read-only, and nothing to do with the write path - they are here because
+  // every request kind has to sort below DIETRICH_REQ_WRITE0. Both addresses are
+  // asked: they answer the same command with different payloads.
+  DIETRICH_REQ_IDENT_PCU,
+  DIETRICH_REQ_IDENT_PSU,
+  // one block of an EEPROM sweep; the block index lives in dump_block_, not in
+  // the request, so a 128 block dump does not need a 128 entry queue
+  DIETRICH_REQ_DUMP,
   // EEPROM block writes, one per parameter block. Contiguous like the PARAM
   // entries and immediately below them, so the block is (req - WRITE0) and the
   // range test is WRITE0 <= req < PARAM0.
@@ -67,6 +72,9 @@ static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
 static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
 // STX + 6 header bytes + 16 data bytes + CRC16 + ETX
 static const size_t DIETRICH_WRITE_FRAME_LEN = 26;
+static const size_t DIETRICH_READ_FRAME_LEN = 10;
+// EEPROMSize in PCU-05_P3.xml, in 16 byte blocks: 0x00..0x7F
+static const uint16_t DIETRICH_EEPROM_BLOCKS = 128;
 // A full parameter write is 2 unlocks + 8 reads + 8 writes + 8 verify reads +
 // 2 re-locks
 static const size_t DIETRICH_QUEUE_LEN = 32;
@@ -215,14 +223,26 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
 
   // --- identification -----------------------------------------------------
-  // Ask the PCU who it thinks it is: dF/dU codes, software and parameter
-  // version, connected PSU/PCU types, serial number and boiler name. A plain
-  // read - no service mode, nothing written - so it is not gated behind
-  // allow_writes, only behind variant pcu05_p3. The result goes to the log.
+  // Ask both device addresses who they think they are: device type, software
+  // and parameter version, operating hours, connected device types and the last
+  // blocking and locking codes. A plain read - no service mode, nothing written
+  // - so it is not gated behind allow_writes, only behind variant pcu05_p3. The
+  // result goes to the log.
   //
   // Sent once on the first poll after boot, as Recom does when it connects. Call
   // this to ask again; the request goes out on the next poll interval.
   bool read_identification();
+
+  // Read EEPROM blocks and log them, hex and ASCII, one line each. A plain read -
+  // READ_EPROM_BLOCK needs no service mode - so nothing is unlocked and nothing is
+  // written, and a block that fails is logged and stepped over rather than
+  // abandoning the sweep. addr is the device (0x00 or 0x01; they answer with
+  // different contents), first is the block index, count how many to walk.
+  //
+  // The whole EEPROM is 0x00..0x7F, of which only 0x14..0x1B (parameters) and
+  // 0x1C..0x1F (counters) are mapped. The rest is where the appliance
+  // identification and the fault history records have to be.
+  bool dump_eeprom(uint8_t addr, uint8_t first, uint8_t count);
 
   // --- writing ------------------------------------------------------------
   // These are the whole write API, and they are meant to be called from a YAML
@@ -260,7 +280,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void decode_counter1_();
   void decode_counter2_();
   void decode_params_();
-  void decode_identification_();
+  void decode_identification_(uint8_t addr);
+  void log_eeprom_block_() const;
   // a run of data bytes read as text, stopping at the first 0x00 or 0xFF pad
   std::string text_(size_t off, size_t len) const;
   // true when at least one param_* sensor is configured; nothing is requested
@@ -283,6 +304,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // reads inside its range - i.e. the image is plausibly a real one
   bool image_is_sane_() const;
   bool block_is_sane_(size_t blk) const;
+  // fills tx_buf_ with a READ_EPROM_BLOCK request for one block
+  void build_read_frame_(uint8_t addr, uint8_t block);
   // fills tx_buf_ from txn_image_; only valid after begin_write_phase_()
   void build_write_frame_(uint8_t block);
   static bool is_write_req_(DietrichRequest req);
@@ -396,6 +419,12 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // whenever read_identification() sets it again. set_variant() decides whether
   // it starts set at all - the default variant is mcr3, which never asks.
   bool pending_ident_{false};
+
+  // --- EEPROM dump: read-only, and outside the transaction machinery entirely --
+  bool dump_active_{false};
+  uint8_t dump_addr_{0x00};
+  uint8_t dump_block_{0};
+  uint16_t dump_end_{0};  // exclusive
 };
 
 }  // namespace dietrich

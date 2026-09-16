@@ -54,23 +54,26 @@ protocols. This component implements two of them, across three variants:
 
 ### Identification (`pcu05_p3` only)
 
-On `variant: pcu05_p3` the component asks the PCU who it thinks it is on the first
-poll after boot, the way Recom opens a connection. It is a plain read — no service
-mode, nothing written — so it is not gated behind `allow_writes` and needs no
-configuration. The answer goes to the log:
+On `variant: pcu05_p3` the component asks both device addresses who they think they
+are, on the first poll after boot, the way Recom opens a connection. It is a plain
+read — no service mode, nothing written — so it is not gated behind `allow_writes`
+and needs no configuration. The answer goes to the log:
 
 ```
-[I][dietrich]: identification: dF-code 7, dU-code 12 (compare these with the identification plate)
-[I][dietrich]:   software version 26, parameter version 3, parameter type 1 (raw bytes)
-[I][dietrich]:   next service code 4, connected PSU type 2, connected PCU type 5, SCU-C 0
-[I][dietrich]:   serial number: 0123456789AB
-[I][dietrich]:   boiler name: PCU-05 TEST
+[I][dietrich]: identification 0x01: device type 5, software version 23, parameter version 255, type 3
+[I][dietrich]:   operating hours 56600, connected SU type 1, connected PSU type 4
+[I][dietrich]:   last blocking code 1, last locking code 36
+[I][dietrich]:   serial number (raw): FF FF FF FF FF
 ```
 
-The dF and dU codes are the ones printed on the appliance's identification plate,
-and the ones a factory-settings restore asks you to enter. They live in the
-identification payload, **not** in the parameter block, so no parameter write can
-disturb them — which is worth knowing before a write and worth checking after one.
+The reply's length picks the layout. A PCU-05 P3 answers at `0x01` with the 16-byte
+per-device form above; the 64-byte appliance form, which is the one carrying the
+**dF/dU codes**, the serial number and the boiler name, has not been seen from
+either address yet — the component decodes it if it ever arrives. Those codes are
+the ones printed on the identification plate and the ones a factory-settings restore
+asks for, and they are **not** in the parameter block, so no parameter write can
+disturb them. See
+[mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md) for both layouts.
 
 To ask again, e.g. from a diagnostic button, `read_identification()` sends it on the
 next poll interval:
@@ -83,6 +86,33 @@ button:
     on_press:
       - lambda: 'id(boiler).read_identification();'
 ```
+
+### Dumping the EEPROM (`pcu05_p3` only)
+
+`dump_eeprom(addr, first, count)` reads a range of EEPROM blocks and logs each as
+hex and ASCII. `READ_EPROM_BLOCK` needs no service mode, so like identification it
+is read-only and works with `allow_writes` off:
+
+```yaml
+button:
+  - platform: template
+    name: "Boiler dump EEPROM 0x00"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(boiler).dump_eeprom(0x00, 0x00, 128);'
+```
+
+```
+[I][dietrich]: eeprom 00:05 5043552D30352050332054455354 |PCU05P3TESTBLOC|
+```
+
+The EEPROM is 2 KB in 128 blocks of 16 bytes, of which only `0x14`–`0x1B`
+(parameters) and `0x1C`–`0x1F` (counters) are mapped. The other 116 are where the
+appliance identification and the boiler's fault history records have to be — the
+history records are 16 bytes each, exactly one block, and carry an operating-hours
+stamp alongside the fault code. A full sweep is about 45 seconds and borrows the
+poll intervals it needs. Both device addresses are worth sweeping; they answer with
+different contents.
 
 ### Writing parameters (`pcu05_p3` only)
 
