@@ -302,9 +302,16 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(param_curve_foot_outside)   // p25, byte 24
   SUB_SENSOR(param_curve_foot_flow)      // p26, byte 25
   SUB_SENSOR(param_curve_cold_outside)   // p27, byte 26, signed
+  // Per cent both ways: published x10 from the stored 2..10, and written in per
+  // cent too, so these read back the number that was typed. Unlike p61 below.
   SUB_SENSOR(param_pump_ch_min)          // p28, byte 27, x10 %
   SUB_SENSOR(param_pump_ch_max)          // p29, byte 28, x10 %
+  SUB_SENSOR(param_frost_protect_outside)  // p30, byte 29, signed
+  SUB_SENSOR(param_dhw_setpoint_raise)   // p32, byte 31
   SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
+  // Published in degrees, written in tenths - the one parameter where the two
+  // differ. See p61 in PARAM_LIMITS (dietrich.cpp) for why it was left that way.
+  SUB_SENSOR(param_control_temp_offset)  // p61, byte 60, signed, stored /10 C
   // Both live in the image's upper half, so they arrive in blocks 0x18 and 0x1A.
   // The sweep reads all eight blocks either way, so they cost nothing extra.
   SUB_SENSOR(param_ch_hysteresis)        // p73, byte 72
@@ -538,7 +545,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   void pub_counter_(sensor::Sensor *s, size_t off, float scale);  // big-endian 16-bit x scale
   // parameter-block publishers; these read params_, not the received frame
   void pub_param_(sensor::Sensor *s, size_t off, float scale);   // byte x scale
-  void pub_param_s8_(sensor::Sensor *s, size_t off);             // signed byte
+  void pub_param_s8_(sensor::Sensor *s, size_t off, float scale);  // signed byte x scale
 
   // nullptr when the received frame is a valid response to the request currently
   // in flight, otherwise a short reason for the log

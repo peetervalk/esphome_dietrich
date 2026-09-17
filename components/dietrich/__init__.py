@@ -105,6 +105,16 @@ def _param_temp_schema():
     )
 
 
+def _param_temp_tenths_schema():
+    # Stored in tenths of a degree, published in degrees, so it needs the one
+    # decimal the whole-degree parameters do not. p61 is the only one.
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_CELSIUS,
+        accuracy_decimals=1,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+    )
+
+
 def _param_percent_schema():
     return sensor.sensor_schema(
         unit_of_measurement=UNIT_PERCENT,
@@ -217,7 +227,10 @@ SENSOR_SCHEMAS = {
     "param_curve_cold_outside": _param_temp_schema(),  # p27, negative
     "param_pump_ch_min": _param_percent_schema(),  # p28
     "param_pump_ch_max": _param_percent_schema(),  # p29
+    "param_frost_protect_outside": _param_temp_schema(),  # p30, negative
+    "param_dhw_setpoint_raise": _param_temp_schema(),  # p32
     "param_dhw_hysteresis": _param_temp_schema(),  # p33
+    "param_control_temp_offset": _param_temp_tenths_schema(),  # p61, negative, /10
     # Upper half of the image (blocks 0x18 and 0x1A). The sweep reads all eight
     # blocks anyway, so these cost no extra requests.
     "param_ch_hysteresis": _param_temp_schema(),  # p73

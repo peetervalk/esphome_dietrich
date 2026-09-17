@@ -205,12 +205,13 @@ static const ParamLimit PARAM_LIMITS[] = {
     {23, 22, 20, 90},   // Max flow system
     {25, 24, 0, 30},    // Footpoint T outside (heating curve)
     {26, 25, 0, 90},    // Footpoint T flow (heating curve)
-    // Stored 2..10 and meaning 20..100 %, which is how Recom and the manual number
-    // them - so write 3, not 30. The param_pump_ch_* sensors publish these x10
-    // because a percentage is what a dashboard wants, and that is the one place in
-    // this component where the number you read back is not the number you write.
-    {28, 27, 2, 10},    // Pump CH minimum speed
-    {29, 28, 2, 10},    // Pump CH maximum speed
+    // Stored 2..10, meaning 20..100 %, which is how Recom and the manual number
+    // them. This component does not: the thing being set is a pump speed in per
+    // cent, the param_pump_ch_* sensors publish per cent, so the write path takes
+    // per cent as well and divides on the way into the byte. Write 30 to get 30 %,
+    // and the sensor reads back the 30 you wrote. See param_store_div_().
+    {28, 27, 20, 100},  // Pump CH minimum speed, per cent, stored /10
+    {29, 28, 20, 100},  // Pump CH maximum speed, per cent, stored /10
     {31, 30, 0, 2},     // Anti legionella
     {32, 31, 0, 25},    // Setpoint raise while charging the calorifier
     {33, 32, 2, 15},    // Hysteresis calorifier - DHW cut-in below tank setpoint
@@ -219,6 +220,14 @@ static const ParamLimit PARAM_LIMITS[] = {
     // moved but not pivoted from Home Assistant.
     {27, 26, -30, 0},   // Clima point outside temp - cold end of the heating curve
     {30, 29, -30, 0},   // Min outside temperature for frost protection
+    // Tenths of a degree, and the one parameter where what you write is not what
+    // you read: type -5 here and param_control_temp_offset reads -0.5 C. It was
+    // NOT rescaled the way p28/p29 were, on purpose. That worked there because the
+    // byte only ever held ten values, so per cent in steps of 10 threw nothing
+    // away; doing the same here would mean whole degrees only, turning 201 usable
+    // settings into 21 and discarding the 0.1 C resolution the parameter exists
+    // for. queue_param() takes an int and the Home Assistant number box steps in
+    // whole units, so there is no way to accept -0.5 without losing the rest.
     {61, 60, -100, 100},  // Offset control temp, tenths of a degree
     {86, 85, -30, 20},  // Offset when warming up for DHW comfort
     // The five below, and p86 just above, sit in the image's *upper* half - six
@@ -238,6 +247,13 @@ static const ParamLimit PARAM_LIMITS[] = {
     {106, 105, -20, 20},  // DHW pump switch-on delay against the boiler pump, signed
 };
 static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMITS[0]);
+
+// How much larger the value you set is than the byte that holds it. p28 and p29
+// are the only two: a pump speed is set in per cent and stored in tenths of the
+// range, so 30 % goes into the byte as 3. Every other writable parameter stores
+// what you type, hence the 1. PARAM_SANITY below is deliberately NOT scaled - it
+// checks the raw image, where these really are 2..10.
+static int param_store_div_(uint8_t param) { return (param == 28 || param == 29) ? 10 : 1; }
 
 // Every documented parameter of the P3 map with a range narrow enough to be worth
 // checking, used to sanity-check a freshly read image before any of it is handed
@@ -991,12 +1007,13 @@ void Dietrich::pub_param_(sensor::Sensor *s, size_t off, float scale) {
   s->publish_state(this->params_[off] * scale);
 }
 
-void Dietrich::pub_param_s8_(sensor::Sensor *s, size_t off) {
+void Dietrich::pub_param_s8_(sensor::Sensor *s, size_t off, float scale) {
   if (s == nullptr || off >= DIETRICH_PARAM_BYTES)
     return;
-  // p27 and p30 are stored as two's complement; Recom shows them signed, the
-  // front panel does not (the manual tells installers to subtract 256 by hand)
-  s->publish_state(static_cast<int8_t>(this->params_[off]));
+  // p27, p30 and p61 are stored as two's complement; Recom shows them signed,
+  // the front panel does not (the manual tells installers to subtract 256 by
+  // hand). p61 is additionally stored in tenths of a degree, hence the scale.
+  s->publish_state(static_cast<int8_t>(this->params_[off]) * scale);
 }
 
 bool Dietrich::want_params_() const {
@@ -1004,7 +1021,9 @@ bool Dietrich::want_params_() const {
          this->param_pump_post_run_sensor_ != nullptr || this->param_max_flow_system_sensor_ != nullptr ||
          this->param_curve_foot_outside_sensor_ != nullptr || this->param_curve_foot_flow_sensor_ != nullptr ||
          this->param_curve_cold_outside_sensor_ != nullptr || this->param_pump_ch_min_sensor_ != nullptr ||
-         this->param_pump_ch_max_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr ||
+         this->param_pump_ch_max_sensor_ != nullptr || this->param_frost_protect_outside_sensor_ != nullptr ||
+         this->param_dhw_setpoint_raise_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr ||
+         this->param_control_temp_offset_sensor_ != nullptr ||
          this->param_ch_hysteresis_sensor_ != nullptr || this->param_calorifier_offset_sensor_ != nullptr;
 }
 
@@ -1018,10 +1037,17 @@ void Dietrich::decode_params_() {
   this->pub_param_(this->param_max_flow_system_sensor_, 22, 1.0f);    // p23
   this->pub_param_(this->param_curve_foot_outside_sensor_, 24, 1.0f); // p25
   this->pub_param_(this->param_curve_foot_flow_sensor_, 25, 1.0f);    // p26
-  this->pub_param_s8_(this->param_curve_cold_outside_sensor_, 26);    // p27
+  this->pub_param_s8_(this->param_curve_cold_outside_sensor_, 26, 1.0f);  // p27
   this->pub_param_(this->param_pump_ch_min_sensor_, 27, 10.0f);       // p28, stored x10 %
   this->pub_param_(this->param_pump_ch_max_sensor_, 28, 10.0f);       // p29, stored x10 %
+  this->pub_param_s8_(this->param_frost_protect_outside_sensor_, 29, 1.0f);  // p30
+  this->pub_param_(this->param_dhw_setpoint_raise_sensor_, 31, 1.0f); // p32
   this->pub_param_(this->param_dhw_hysteresis_sensor_, 32, 1.0f);     // p33
+  // x0.1 because the sensor carries a Celsius unit and a temperature device_class,
+  // and a raw -5 published under those would be read - and unit-converted - as five
+  // whole degrees. The write path deliberately still takes tenths; see p61 in
+  // PARAM_LIMITS for why that asymmetry is the lesser evil.
+  this->pub_param_s8_(this->param_control_temp_offset_sensor_, 60, 0.1f);  // p61, stored /10 C
   this->pub_param_(this->param_ch_hysteresis_sensor_, 72, 1.0f);      // p73
   this->pub_param_(this->param_calorifier_offset_sensor_, 104, 1.0f); // p105
 }
@@ -1244,10 +1270,12 @@ bool Dietrich::begin_write_phase_() {
     for (uint8_t i = 0; i < n_apply; i++) {
       const PendingEdit &e = this->edit_queue_[apply[i]];
       const ParamLimit *lim = find_limit_(e.param);
+      // x div so the before and after are quoted the same way round: p28 going
+      // from 3 to 4 in the byte is "30 -> 40", which is what was actually asked
+      // for and what the sensor will read back.
+      const int was = lim != nullptr ? param_value_(*lim, this->txn_read_[e.offset]) : this->txn_read_[e.offset];
       ESP_LOGI(TAG, "staging p%u (byte %u): %d -> %d", static_cast<unsigned>(e.param),
-               static_cast<unsigned>(e.offset),
-               lim != nullptr ? param_value_(*lim, this->txn_read_[e.offset]) : this->txn_read_[e.offset],
-               static_cast<int>(e.shown));
+               static_cast<unsigned>(e.offset), was * param_store_div_(e.param), static_cast<int>(e.shown));
       this->txn_image_[e.offset] = e.value;
     }
     apply_param_crcs_(this->txn_image_);
@@ -1641,6 +1669,17 @@ bool Dietrich::queue_param(uint8_t param, int value) {
                       value, static_cast<int>(lim->min), static_cast<int>(lim->max));
     return false;
   }
+  // p28/p29 only. The byte behind them holds 2..10, so per cent arrives in steps
+  // of 10 and a 45 has no byte to go into. Refused rather than rounded, for the
+  // same reason the range above is: a 45 silently becoming 40 is a write nobody
+  // asked for, reported as a success.
+  const int div = param_store_div_(param);
+  if (div != 1 && value % div != 0) {
+    this->set_result_(1, "p%u refused: %d is not a multiple of %d - the boiler stores this one in steps of %d",
+                      static_cast<unsigned>(param), value, div, div);
+    return false;
+  }
+
   // The queue is what a running transaction is writing from; changing it underneath
   // one would mean the verify compares against an image nobody asked for.
   if (this->txn_active_ || this->pending_txn_ != DIETRICH_TXN_NONE) {
@@ -1653,7 +1692,7 @@ bool Dietrich::queue_param(uint8_t param, int value) {
   for (uint8_t i = 0; i < this->edit_len_; i++) {
     if (this->edit_queue_[i].param == param) {
       const int was = this->edit_queue_[i].shown;
-      this->edit_queue_[i].value = static_cast<uint8_t>(value);
+      this->edit_queue_[i].value = static_cast<uint8_t>(value / div);
       this->edit_queue_[i].shown = static_cast<int16_t>(value);
       this->publish_write_queue_();
       this->set_result_(0, "p%u restaged: %d replaces %d", static_cast<unsigned>(param), value, was);
@@ -1671,7 +1710,8 @@ bool Dietrich::queue_param(uint8_t param, int value) {
   e.param = param;
   e.offset = lim->offset;
   // The cast is the whole of the two's complement conversion: -10 becomes 246.
-  e.value = static_cast<uint8_t>(value);
+  // div is 1 for every signed parameter, so the two never interact.
+  e.value = static_cast<uint8_t>(value / div);
   e.shown = static_cast<int16_t>(value);
   this->publish_write_queue_();
   this->set_result_(0, "p%u=%d staged, %u edit(s) waiting - press write to send them",

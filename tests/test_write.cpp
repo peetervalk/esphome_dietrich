@@ -776,21 +776,35 @@ int main() {
   {
     begin("pump CH min and max");
     auto *d = make();
-    // Byte 27 starts at 0x03 and byte 28 at 0x0A - 30 % and 100 %, published x10
-    // by the param_pump_ch_* sensors. The parameter itself is 2..10, which is how
-    // Recom and the manual number it, so 4 here means 40 %.
-    check(d->queue_param(28, 4), "p28 = 4 staged");
-    check(d->queue_param(29, 9), "p29 = 9 staged");
+    // Byte 27 starts at 0x03 and byte 28 at 0x0A - 30 % and 100 %, which is what
+    // the param_pump_ch_* sensors publish. Per cent is what goes in as well, so
+    // what is typed here is what those sensors read back afterwards; the /10 into
+    // the byte is the component's business, not Home Assistant's.
+    check(d->queue_param(28, 40), "p28 = 40 % staged");
+    check(d->queue_param(29, 90), "p29 = 90 % staged");
     check(d->write_queue(), "the write is accepted");
     pump(*d);
-    check(g_boiler.eeprom[1][11] == 4, "byte 27 holds 4, not 40");
+    check(g_boiler.eeprom[1][11] == 4, "byte 27 holds 4, the stored tenth of 40");
     check(g_boiler.eeprom[1][12] == 9, "byte 28 holds 9");
-    check(logged("write successful, verified by read-back: p28=4, p29=9"), "both verified");
+    check(logged("write successful, verified by read-back: p28=40, p29=90"),
+          "and both are reported the way they were typed");
 
-    // The percentage is not what goes in: 30 is outside the parameter's 2..10.
+    // The parameter number is not what goes in any more: 4 is 4 %, far below the
+    // 20 % the pump will accept.
     g_log.clear();
-    check(!d->queue_param(28, 30), "a percentage typed in by mistake is refused");
-    check(logged("p28 refused: 30 is outside the documented range 2..10"), "and the range says what it wanted");
+    check(!d->queue_param(28, 4), "the raw parameter value is now the mistake, and is refused");
+    check(logged("p28 refused: 4 is outside the documented range 20..100"), "and the range says what it wanted");
+
+    // 20..100 has ten usable values, not eighty. Rounding 45 down to 40 would be
+    // a write nobody asked for, so it is refused like any other bad value.
+    g_log.clear();
+    check(!d->queue_param(28, 45), "a percentage the byte cannot hold is refused");
+    check(logged("p28 refused: 45 is not a multiple of 10"), "and says why, not just that");
+
+    // The boundaries still work out to whole bytes: 20 % -> 2 and 100 % -> 10.
+    g_log.clear();
+    check(d->queue_param(28, 20), "20 % is accepted");
+    check(d->queue_param(29, 100), "100 % is accepted");
     delete d;
   }
 
