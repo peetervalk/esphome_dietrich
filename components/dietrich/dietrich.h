@@ -146,7 +146,11 @@ enum DietrichTxn : uint8_t {
 struct PendingEdit {
   uint8_t param;
   uint8_t offset;
-  uint8_t value;
+  uint8_t value;  // the byte as it goes into EEPROM
+  // The same value as the manual writes it, kept so the queue and the verdicts
+  // can show -10 where the byte holds 246. Five parameters are stored two's
+  // complement; see PARAM_LIMITS.
+  int16_t shown;
 };
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
@@ -295,6 +299,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(param_pump_ch_min)          // p28, byte 27, x10 %
   SUB_SENSOR(param_pump_ch_max)          // p29, byte 28, x10 %
   SUB_SENSOR(param_dhw_hysteresis)       // p33, byte 32
+  // Both live in the image's upper half, so they arrive in blocks 0x18 and 0x1A.
+  // The sweep reads all eight blocks either way, so they cost nothing extra.
+  SUB_SENSOR(param_ch_hysteresis)        // p73, byte 72
+  SUB_SENSOR(param_calorifier_offset)    // p105, byte 104
 
   // --- identification -----------------------------------------------------
   // Ask both device addresses who they think they are: device type, software
@@ -341,7 +349,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // is already staged replaces its value rather than adding a second edit for the
   // same byte. Nothing reaches the boiler until write_queue() is called, so this
   // touches RAM only and is not gated behind allow_writes.
-  bool queue_param(uint8_t param, uint8_t value);
+  //
+  // value is signed, because five parameters are. Pass what the manual says: -10
+  // for a p27 of -10, not the 246 the byte holds.
+  bool queue_param(uint8_t param, int value);
 
   // Throw the staged edits away, writing nothing.
   void clear_param_queue();
@@ -355,7 +366,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
 
   // Stage one edit and write it immediately: clear_param_queue(), queue_param()
   // and write_queue() in one call, for a lambda that only ever changes one thing.
-  bool write_param(uint8_t param, uint8_t value);
+  bool write_param(uint8_t param, int value);
 
   // COMMAND 0x31, RESET, addressed to the PCU and sent on its own: no service
   // mode, no EEPROM, nothing read or written. This is the protocol's version of

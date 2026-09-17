@@ -694,6 +694,124 @@ int main() {
     delete d;
   }
 
+  // -- 5a2. the two's complement parameters ----------------------------------
+  {
+    begin("a negative parameter value");
+    auto *d = make();
+    // The manual: "Setting value - 256 = Desired value", tabulating 226 = -30 and
+    // 246 = -10. That is int8, so the conversion is a cast. Byte 26 starts at
+    // 0xFA, which is -6.
+    check(d->queue_param(27, -10), "p27 = -10 staged");
+    check(logged("p27=-10 staged"), "and shown the way the manual writes it, not as 246");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d);
+    check(g_boiler.eeprom[1][10] == 0xF6, "byte 26 holds 246, which is -10 two's complement");
+    check(logged("staging p27 (byte 26): -6 -> -10"), "the before and after are both read as signed");
+    check(logged("write successful, verified by read-back: p27=-10"), "and the verdict shows it signed too");
+    delete d;
+  }
+
+  // -- 5a3. a signed range is checked at both ends ---------------------------
+  {
+    begin("a negative parameter has a range like any other");
+    auto *d = make();
+    check(!d->queue_param(27, 5), "p27 = 5 refused: its documented max is 0");
+    check(logged("p27 refused: 5 is outside the documented range -30..0"), "the range is reported signed");
+
+    g_log.clear();
+    check(!d->queue_param(27, -40), "p27 = -40 refused at the other end");
+    check(logged("-40 is outside the documented range -30..0"), "and so is the value");
+
+    // The sanity table reads them signed too. 0x32 is +50, which is outside
+    // -30..0 - before the signed support it was not checked at all.
+    g_log.clear();
+    g_boiler.eeprom[1][10] = 0x32;
+    check(d->write_param(33, 6), "an unrelated write is accepted");
+    pump(*d);
+    check(g_boiler.writes == 0, "and refuses to write an image with p27 out of range");
+    check(logged("p27 (byte 26) is 50, outside its documented -30..0"), "the signed read is what caught it");
+    delete d;
+  }
+
+  // -- 5a2. the two's complement parameters ----------------------------------
+  {
+    begin("a negative parameter value");
+    auto *d = make();
+    // The manual: "Setting value - 256 = Desired value", tabulating 226 = -30 and
+    // 246 = -10. That is int8, so the conversion is a cast. Byte 26 starts at
+    // 0xFA, which is -6.
+    check(d->queue_param(27, -10), "p27 = -10 staged");
+    check(logged("p27=-10 staged"), "and shown the way the manual writes it, not as 246");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d);
+    check(g_boiler.eeprom[1][10] == 0xF6, "byte 26 holds 246, which is -10 two's complement");
+    check(logged("staging p27 (byte 26): -6 -> -10"), "the before and after are both read as signed");
+    check(logged("write successful, verified by read-back: p27=-10"), "and the verdict shows it signed too");
+    delete d;
+  }
+
+  // -- 5a3. a signed range is checked at both ends ---------------------------
+  {
+    begin("a negative parameter has a range like any other");
+    auto *d = make();
+    check(!d->queue_param(27, 5), "p27 = 5 refused: its documented max is 0");
+    check(logged("p27 refused: 5 is outside the documented range -30..0"), "the range is reported signed");
+
+    g_log.clear();
+    check(!d->queue_param(27, -40), "p27 = -40 refused at the other end");
+    check(logged("-40 is outside the documented range -30..0"), "and so is the value");
+
+    // The sanity table reads them signed too. 0x32 is +50, which is outside
+    // -30..0 - before the signed support it was not checked at all.
+    g_log.clear();
+    g_boiler.eeprom[1][10] = 0x32;
+    check(d->write_param(33, 6), "an unrelated write is accepted");
+    pump(*d);
+    check(g_boiler.writes == 0, "and refuses to write an image with p27 out of range");
+    check(logged("p27 (byte 26) is 50, outside its documented -30..0"), "the signed read is what caught it");
+    delete d;
+  }
+
+  // -- 5a4. the pump speed pair, stored in tenths ---------------------------
+  {
+    begin("pump CH min and max");
+    auto *d = make();
+    // Byte 27 starts at 0x03 and byte 28 at 0x0A - 30 % and 100 %, published x10
+    // by the param_pump_ch_* sensors. The parameter itself is 2..10, which is how
+    // Recom and the manual number it, so 4 here means 40 %.
+    check(d->queue_param(28, 4), "p28 = 4 staged");
+    check(d->queue_param(29, 9), "p29 = 9 staged");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d);
+    check(g_boiler.eeprom[1][11] == 4, "byte 27 holds 4, not 40");
+    check(g_boiler.eeprom[1][12] == 9, "byte 28 holds 9");
+    check(logged("write successful, verified by read-back: p28=4, p29=9"), "both verified");
+
+    // The percentage is not what goes in: 30 is outside the parameter's 2..10.
+    g_log.clear();
+    check(!d->queue_param(28, 30), "a percentage typed in by mistake is refused");
+    check(logged("p28 refused: 30 is outside the documented range 2..10"), "and the range says what it wanted");
+    delete d;
+  }
+
+  // -- 5a5. the two upper-half parameters that now have sensors -------------
+  {
+    begin("p73 and p105, in the image's upper half");
+    auto *d = make();
+    check(d->queue_param(73, 8), "p73 staged");
+    check(d->queue_param(105, 3), "p105 staged");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d);
+    check(g_boiler.eeprom[4][8] == 8, "byte 72 took");
+    check(g_boiler.eeprom[6][8] == 3, "byte 104 took");
+    // The upper half carries its own CRC at bytes 126..127, and this is the only
+    // path that touches it.
+    check(g_boiler.eeprom[7][14] != 0x85 || g_boiler.eeprom[7][15] != 0x9A,
+          "the upper-half CRC was refreshed, not left at the value it was read with");
+    check(logged("write successful, verified by read-back: p73=8, p105=3"), "both verified");
+    delete d;
+  }
+
   // -- 5b. the queue, and what empties it ------------------------------------
   {
     begin("queue handling");

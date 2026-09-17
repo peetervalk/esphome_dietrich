@@ -368,11 +368,15 @@ button:
 #     mode: box
 #     entity_category: config
 #
+#   # Negative values are real: p27, p30, p61, p86 and p106 are stored two's
+#   # complement, and the manual gives it as "setting value - 256 = desired
+#   # value" (226 = -30, 246 = -10). Type what the manual says and the component
+#   # does the cast. p61 is the most negative at -100.
 #   - platform: template
 #     name: "Boiler write value"
 #     id: write_value
 #     optimistic: true
-#     min_value: 0
+#     min_value: -100
 #     max_value: 255
 #     step: 1
 #     mode: box
@@ -389,7 +393,7 @@ button:
 #     on_press:
 #       - lambda: |-
 #           id(boiler).queue_param((uint8_t) id(write_param_no).state,
-#                                  (uint8_t) id(write_value).state);
+#                                  (int) id(write_value).state);
 #
 #   # Everything staged, in one transaction. Refused unless the write enable
 #   # switch is on; the boiler is not required to be idle. The queue survives a

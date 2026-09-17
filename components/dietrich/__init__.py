@@ -218,6 +218,10 @@ SENSOR_SCHEMAS = {
     "param_pump_ch_min": _param_percent_schema(),  # p28
     "param_pump_ch_max": _param_percent_schema(),  # p29
     "param_dhw_hysteresis": _param_temp_schema(),  # p33
+    # Upper half of the image (blocks 0x18 and 0x1A). The sweep reads all eight
+    # blocks anyway, so these cost no extra requests.
+    "param_ch_hysteresis": _param_temp_schema(),  # p73
+    "param_calorifier_offset": _param_temp_schema(),  # p105
 }
 
 # Status bits. valve_bit0/bit6 and pump_bit0/bit1/bit2 carry a device_class

@@ -167,7 +167,7 @@ lists what is staged.
 
 | Method | What it does |
 |---|---|
-| `queue_param(p, v)` | stage one edit; refuses a parameter that is not writable or a value out of range |
+| `queue_param(p, v)` | stage one edit; refuses a parameter that is not writable or a value out of range. `v` is signed — pass `-10`, not the `246` the byte holds |
 | `write_queue()` | write every staged edit in one transaction, and empty the queue only if it verifies |
 | `clear_param_queue()` | throw the staged edits away |
 | `write_param(p, v)` | stage one edit and write it immediately — the three above in one call |
@@ -205,7 +205,24 @@ outside the documented range is **refused, not clamped** — a 30 meant for p1 a
 typed into p33 writes nothing, rather than quietly writing 15 and reporting
 success. A value the boiler already holds is not written at all, because EEPROM
 endurance is finite, and a queue where every edit is already satisfied sends no
-write frame. The gas/air settings
+write frame.
+
+Twenty parameters are writable; the table is `PARAM_LIMITS` in
+[dietrich.cpp](components/dietrich/dietrich.cpp). Two of them need watching.
+**p28 and p29** (pump CH min/max) are stored 2–10 and mean 20–100 %, which is how
+Recom and the manual number them — so you write `4` to get the `40 %` the
+`param_pump_ch_*` sensors then read back. It is the one place in this component
+where what you write is not what you read. **p73 and p105** sit in the image's
+upper half, so a write to either refreshes the CRC at bytes 126–127 rather than
+the one at 62–63 — a path no other writer has been observed taking.
+
+Five parameters — p27, p30, p61, p86 and p106 — are stored two's complement. The
+manual puts it as *“Setting value − 256 = Desired value”* and tabulates 226 = −30,
+246 = −10, 255 = −1, which is `int8` by another name, so the conversion each way
+is a cast. Pass the value the manual gives. It matters most for **p27**, the cold
+end of the heating curve: without it the curve could be moved but not pivoted.
+
+The gas/air settings
 (p17-p21, p77, p78) and the controller-protection limits (p55-p57) are refused
 outright, because a bad write there is a combustion-safety problem rather than a
 comfort one.

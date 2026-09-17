@@ -34,6 +34,13 @@ read-modify-write - and, more to the point, the refusals:
 - a value outside the documented range is **refused, not clamped**, and so is a
   parameter outside the writable list - the gas/air settings and the
   controller-protection limits
+- the five two's complement parameters (p27, p30, p61, p86, p106) round-trip as
+  the manual writes them: `-10` in, `0xF6` in EEPROM, `-10` back out of the
+  queue, the verdict and the range check
+- p28 and p29 are written in the units the manual numbers them in (2..10, not
+  20..100 %), and a percentage typed in by mistake is refused rather than stored
+- a write to p73 or p105 lands in the image's **upper** half and refreshes the
+  CRC at bytes 126..127 rather than the one at 62..63
 - several queued edits ride in **one** transaction and cost exactly what one
   edit does: eight block writes, one unlock pair, one EEPROM cycle
 - queueing a parameter twice replaces its value rather than staging two edits

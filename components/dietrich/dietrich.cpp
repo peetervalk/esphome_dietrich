@@ -176,18 +176,25 @@ struct CodeText {
 //
 // Deliberately absent, and not to be added casually: the gas/air settings
 // (p17-p21, p77, p78) and the controller-protection limits (p55-p57). A bad
-// write there is a combustion-safety problem rather than a comfort one. Also
-// absent are the parameters stored as two's complement (p27, p30, p61, p86,
-// p106), which would need a signed API.
+// write there is a combustion-safety problem rather than a comfort one.
 //
 // Adding a parameter is a one-line change; `offset` is the "Byte" column of the
 // full parameter table in mapping/pcu05_p3_protocol.md.
 struct ParamLimit {
   uint8_t param;   // the pNN number, as the manual and the map number it
   uint8_t offset;  // byte offset into the 128 byte parameter block
-  uint8_t min;
-  uint8_t max;
+  // Signed, and a negative min is what marks the byte as two's complement. The
+  // manual puts it as "setting value - 256 = desired value" and tabulates
+  // 226 = -30, 246 = -10, 255 = -1 - which is int8 by another name, so the
+  // conversion either way is a cast. See param_value_().
+  int16_t min;
+  int16_t max;
 };
+
+// A stored byte as the manual reads it.
+static int param_value_(const ParamLimit &lim, uint8_t raw) {
+  return lim.min < 0 ? static_cast<int>(static_cast<int8_t>(raw)) : static_cast<int>(raw);
+}
 
 static const ParamLimit PARAM_LIMITS[] = {
     {1, 0, 20, 90},     // T flow set point - max flow temperature during CH
@@ -198,9 +205,22 @@ static const ParamLimit PARAM_LIMITS[] = {
     {23, 22, 20, 90},   // Max flow system
     {25, 24, 0, 30},    // Footpoint T outside (heating curve)
     {26, 25, 0, 90},    // Footpoint T flow (heating curve)
+    // Stored 2..10 and meaning 20..100 %, which is how Recom and the manual number
+    // them - so write 3, not 30. The param_pump_ch_* sensors publish these x10
+    // because a percentage is what a dashboard wants, and that is the one place in
+    // this component where the number you read back is not the number you write.
+    {28, 27, 2, 10},    // Pump CH minimum speed
+    {29, 28, 2, 10},    // Pump CH maximum speed
     {31, 30, 0, 2},     // Anti legionella
     {32, 31, 0, 25},    // Setpoint raise while charging the calorifier
     {33, 32, 2, 15},    // Hysteresis calorifier - DHW cut-in below tank setpoint
+    // Two's complement, and the reason the range check and the API are signed.
+    // p27 is the cold end of the heating curve, so without it the curve could be
+    // moved but not pivoted from Home Assistant.
+    {27, 26, -30, 0},   // Clima point outside temp - cold end of the heating curve
+    {30, 29, -30, 0},   // Min outside temperature for frost protection
+    {61, 60, -100, 100},  // Offset control temp, tenths of a degree
+    {86, 85, -30, 20},  // Offset when warming up for DHW comfort
     // The four below sit in the image's *upper* half, so a write to any of them
     // refreshes the CRC at bytes 126..127 rather than the one at 62..63. That the
     // upper half is protected the same way is certain - the stored CRC checks out
@@ -212,6 +232,7 @@ static const ParamLimit PARAM_LIMITS[] = {
     {85, 84, 0, 20},    // Hysteresis warming up (DHW comfort)
     {88, 87, 1, 10},    // Hysteresis DHW - combi/flow-through only
     {105, 104, 0, 10},  // Offset calorifier - switch-off offset, tank sensor
+    {106, 105, -20, 20},  // DHW pump switch-on delay against the boiler pump, signed
 };
 static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMITS[0]);
 
@@ -225,7 +246,10 @@ static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMIT
 //
 // `A x 100` parameters are stored divided by 100, so a documented 1000..10000 is a
 // stored 10..100. Verified against a live PCU-05 P3 image: all 58 entries fall
-// inside their range.
+// inside their range. The five two's complement parameters are here as well, read
+// through param_value_() like everywhere else - before that they were unchecked,
+// because a byte of 246 compared against an unsigned 0..30 fails for the wrong
+// reason.
 static const ParamLimit PARAM_SANITY[] = {
     {1, 0, 20, 90},      {2, 1, 40, 65},      {3, 2, 0, 3},        {4, 3, 0, 2},
     {5, 4, 0, 99},       {17, 16, 10, 100},   {18, 17, 10, 100},   {19, 18, 10, 50},
@@ -242,6 +266,9 @@ static const ParamLimit PARAM_SANITY[] = {
     {91, 90, 0, 100},    {92, 91, 0, 100},    {94, 93, 1, 99},     {95, 94, 1, 255},
     {97, 96, 0, 1},      {101, 100, 0, 99},   {105, 104, 0, 10},   {107, 106, 1, 255},
     {110, 109, 0, 110},  {112, 111, 0, 100},
+    // two's complement; see param_value_()
+    {27, 26, -30, 0},    {30, 29, -30, 0},    {61, 60, -100, 100}, {86, 85, -30, 20},
+    {106, 105, -20, 20},
 };
 static const size_t PARAM_SANITY_LEN = sizeof(PARAM_SANITY) / sizeof(PARAM_SANITY[0]);
 
@@ -958,7 +985,8 @@ bool Dietrich::want_params_() const {
          this->param_pump_post_run_sensor_ != nullptr || this->param_max_flow_system_sensor_ != nullptr ||
          this->param_curve_foot_outside_sensor_ != nullptr || this->param_curve_foot_flow_sensor_ != nullptr ||
          this->param_curve_cold_outside_sensor_ != nullptr || this->param_pump_ch_min_sensor_ != nullptr ||
-         this->param_pump_ch_max_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr;
+         this->param_pump_ch_max_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr ||
+         this->param_ch_hysteresis_sensor_ != nullptr || this->param_calorifier_offset_sensor_ != nullptr;
 }
 
 void Dietrich::decode_params_() {
@@ -975,6 +1003,8 @@ void Dietrich::decode_params_() {
   this->pub_param_(this->param_pump_ch_min_sensor_, 27, 10.0f);       // p28, stored x10 %
   this->pub_param_(this->param_pump_ch_max_sensor_, 28, 10.0f);       // p29, stored x10 %
   this->pub_param_(this->param_dhw_hysteresis_sensor_, 32, 1.0f);     // p33
+  this->pub_param_(this->param_ch_hysteresis_sensor_, 72, 1.0f);      // p73
+  this->pub_param_(this->param_calorifier_offset_sensor_, 104, 1.0f); // p105
 }
 
 uint32_t Dietrich::timeout_for_(DietrichRequest req) {
@@ -1052,13 +1082,13 @@ bool Dietrich::image_is_sane_() const {
     const ParamLimit &s = PARAM_SANITY[i];
     if (s.offset < lo || s.offset >= hi)
       continue;
-    const uint8_t v = this->txn_read_[s.offset];
+    const int v = param_value_(s, this->txn_read_[s.offset]);
     if (v < s.min || v > s.max) {
       // the first bad byte is enough: report it and stop, rather than walking the
       // rest of the table logging a line per parameter and blocking the loop
-      ESP_LOGE(TAG, "refusing to write: p%u (byte %u) reads %u, outside its documented %u..%u",
-               static_cast<unsigned>(s.param), static_cast<unsigned>(s.offset), static_cast<unsigned>(v),
-               static_cast<unsigned>(s.min), static_cast<unsigned>(s.max));
+      ESP_LOGE(TAG, "refusing to write: p%u (byte %u) reads %d, outside its documented %d..%d",
+               static_cast<unsigned>(s.param), static_cast<unsigned>(s.offset), v, static_cast<int>(s.min),
+               static_cast<int>(s.max));
       return false;
     }
   }
@@ -1077,12 +1107,11 @@ bool Dietrich::block_is_sane_(size_t blk) const {
     const ParamLimit &s = PARAM_SANITY[i];
     if (s.offset < lo || s.offset >= hi)
       continue;
-    const uint8_t v = this->txn_read_[s.offset];
+    const int v = param_value_(s, this->txn_read_[s.offset]);
     if (v < s.min || v > s.max) {
-      ESP_LOGE(TAG, "block 0x%02X read back implausible: p%u (byte %u) is %u, outside its documented %u..%u",
+      ESP_LOGE(TAG, "block 0x%02X read back implausible: p%u (byte %u) is %d, outside its documented %d..%d",
                static_cast<unsigned>(DIETRICH_PARAM_FIRST_BLOCK + blk), static_cast<unsigned>(s.param),
-               static_cast<unsigned>(s.offset), static_cast<unsigned>(v), static_cast<unsigned>(s.min),
-               static_cast<unsigned>(s.max));
+               static_cast<unsigned>(s.offset), v, static_cast<int>(s.min), static_cast<int>(s.max));
       return false;
     }
   }
@@ -1165,8 +1194,8 @@ bool Dietrich::begin_write_phase_() {
     for (uint8_t i = 0; i < this->edit_len_; i++) {
       const PendingEdit &e = this->edit_queue_[i];
       if (this->txn_read_[e.offset] == e.value) {
-        ESP_LOGI(TAG, "p%u already reads %u, dropping that edit", static_cast<unsigned>(e.param),
-                 static_cast<unsigned>(e.value));
+        ESP_LOGI(TAG, "p%u already reads %d, dropping that edit", static_cast<unsigned>(e.param),
+                 static_cast<int>(e.shown));
       } else {
         apply[n_apply++] = i;
       }
@@ -1190,9 +1219,11 @@ bool Dietrich::begin_write_phase_() {
 
     for (uint8_t i = 0; i < n_apply; i++) {
       const PendingEdit &e = this->edit_queue_[apply[i]];
-      ESP_LOGI(TAG, "staging p%u (byte %u): %u -> %u", static_cast<unsigned>(e.param),
-               static_cast<unsigned>(e.offset), static_cast<unsigned>(this->txn_read_[e.offset]),
-               static_cast<unsigned>(e.value));
+      const ParamLimit *lim = find_limit_(e.param);
+      ESP_LOGI(TAG, "staging p%u (byte %u): %d -> %d", static_cast<unsigned>(e.param),
+               static_cast<unsigned>(e.offset),
+               lim != nullptr ? param_value_(*lim, this->txn_read_[e.offset]) : this->txn_read_[e.offset],
+               static_cast<int>(e.shown));
       this->txn_image_[e.offset] = e.value;
     }
     apply_param_crcs_(this->txn_image_);
@@ -1537,8 +1568,8 @@ static void format_edits_(const PendingEdit *edits, uint8_t len, char *buf, size
   }
   size_t at = 0;
   for (uint8_t i = 0; i < len && at + 1 < size; i++) {
-    const int n = snprintf(buf + at, size - at, "%sp%u=%u", i == 0 ? "" : ", ",
-                           static_cast<unsigned>(edits[i].param), static_cast<unsigned>(edits[i].value));
+    const int n = snprintf(buf + at, size - at, "%sp%u=%d", i == 0 ? "" : ", ",
+                           static_cast<unsigned>(edits[i].param), static_cast<int>(edits[i].shown));
     if (n < 0)
       break;
     at += static_cast<size_t>(n);
@@ -1571,7 +1602,7 @@ void Dietrich::publish_write_queue_() {
   this->publish_text_(this->write_queue_text_sensor_, buf);
 }
 
-bool Dietrich::queue_param(uint8_t param, uint8_t value) {
+bool Dietrich::queue_param(uint8_t param, int value) {
   const ParamLimit *lim = find_limit_(param);
   if (lim == nullptr) {
     this->set_result_(1, "p%u refused: not one of the parameters this component will write",
@@ -1582,9 +1613,8 @@ bool Dietrich::queue_param(uint8_t param, uint8_t value) {
   // typo, and wrong for a box in Home Assistant: a 30 meant for p1 and typed into
   // p33 should write nothing, rather than quietly writing 15 and reporting success.
   if (value < lim->min || value > lim->max) {
-    this->set_result_(1, "p%u refused: %u is outside the documented range %u..%u", static_cast<unsigned>(param),
-                      static_cast<unsigned>(value), static_cast<unsigned>(lim->min),
-                      static_cast<unsigned>(lim->max));
+    this->set_result_(1, "p%u refused: %d is outside the documented range %d..%d", static_cast<unsigned>(param),
+                      value, static_cast<int>(lim->min), static_cast<int>(lim->max));
     return false;
   }
   // The queue is what a running transaction is writing from; changing it underneath
@@ -1598,11 +1628,11 @@ bool Dietrich::queue_param(uint8_t param, uint8_t value) {
   // not asking for two values in one byte, so the second replaces the first.
   for (uint8_t i = 0; i < this->edit_len_; i++) {
     if (this->edit_queue_[i].param == param) {
-      const uint8_t was = this->edit_queue_[i].value;
-      this->edit_queue_[i].value = value;
+      const int was = this->edit_queue_[i].shown;
+      this->edit_queue_[i].value = static_cast<uint8_t>(value);
+      this->edit_queue_[i].shown = static_cast<int16_t>(value);
       this->publish_write_queue_();
-      this->set_result_(0, "p%u restaged: %u replaces %u", static_cast<unsigned>(param),
-                        static_cast<unsigned>(value), static_cast<unsigned>(was));
+      this->set_result_(0, "p%u restaged: %d replaces %d", static_cast<unsigned>(param), value, was);
       return true;
     }
   }
@@ -1616,11 +1646,12 @@ bool Dietrich::queue_param(uint8_t param, uint8_t value) {
   PendingEdit &e = this->edit_queue_[this->edit_len_++];
   e.param = param;
   e.offset = lim->offset;
-  e.value = value;
+  // The cast is the whole of the two's complement conversion: -10 becomes 246.
+  e.value = static_cast<uint8_t>(value);
+  e.shown = static_cast<int16_t>(value);
   this->publish_write_queue_();
-  this->set_result_(0, "p%u=%u staged, %u edit(s) waiting - press write to send them",
-                    static_cast<unsigned>(param), static_cast<unsigned>(value),
-                    static_cast<unsigned>(this->edit_len_));
+  this->set_result_(0, "p%u=%d staged, %u edit(s) waiting - press write to send them",
+                    static_cast<unsigned>(param), value, static_cast<unsigned>(this->edit_len_));
   return true;
 }
 
@@ -1662,7 +1693,7 @@ bool Dietrich::write_queue() {
   return true;
 }
 
-bool Dietrich::write_param(uint8_t param, uint8_t value) {
+bool Dietrich::write_param(uint8_t param, int value) {
   if (this->txn_active_ || this->pending_txn_ != DIETRICH_TXN_NONE) {
     this->set_result_(1, "write of p%u refused: another write is already in progress",
                       static_cast<unsigned>(param));
