@@ -11,6 +11,8 @@ namespace dietrich {
 
 // lookup table entry for the status/locking/blocking code registers
 struct CodeText;
+// one writable parameter and its documented range; the table lives in dietrich.cpp
+struct ParamLimit;
 
 enum DietrichVariant : uint8_t {
   DIETRICH_VARIANT_MCR3 = 0,
@@ -108,6 +110,14 @@ static const size_t DIETRICH_QUEUE_LEN = 40;
 // Longest frame send_raw() will accept. A write frame is 26; this leaves room to
 // replay something longer off a capture without letting a typo run away.
 static const size_t DIETRICH_RAW_FRAME_MAX = 40;
+// How many parameter edits can be staged before one write carries them all to the
+// boiler. A parameter write already reads, rewrites and verifies the whole 128
+// byte image whatever it is changing, so N edits cost exactly what one does: the
+// same thirty-odd frames on the bus and the same single EEPROM cycle. That is the
+// reason the queue exists - not the typing it saves, but that changing six
+// parameters one at a time would be six EEPROM cycles and six chances to provoke
+// the blocking a write can bring on. See begin_write_phase_().
+static const size_t DIETRICH_EDIT_QUEUE_MAX = 8;
 
 enum DietrichState : uint8_t {
   DIETRICH_IDLE = 0,
@@ -129,6 +139,16 @@ enum DietrichTxn : uint8_t {
   DIETRICH_TXN_RAW,           // one arbitrary frame, unlocking nothing
 };
 
+// One staged parameter edit, as queue_param() accepts it: the pNN number, kept
+// only so the queue and the result can name it; the byte it occupies in the 128
+// byte image; and the value. The range check happens when the edit is queued, so
+// an out of range value never reaches this struct.
+struct PendingEdit {
+  uint8_t param;
+  uint8_t offset;
+  uint8_t value;
+};
+
 class Dietrich : public PollingComponent, public uart::UARTDevice {
  public:
   void set_variant(DietrichVariant variant) {
@@ -138,6 +158,13 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
     this->pending_ident_ = variant == DIETRICH_VARIANT_PCU05_P3;
   }
   void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
+  // The UI gate, and only that: a switch in Home Assistant so a write cannot be
+  // set off by a stray press or a misfiring automation. The real gate is
+  // allow_writes, which is compiled in and cannot be changed from Home Assistant
+  // at all. This defaults to true so a configuration that drives writes purely
+  // from lambdas behaves exactly as it did before the switch existed; a YAML that
+  // does declare the switch turns it off at boot and is then the authority.
+  void set_write_enabled(bool on) { this->write_enabled_ = on; }
   // When set, a parameter write unlocks with CODE_FACTORY (0x09/0x52) instead of
   // CODE_SERVICE (0x08/0x0C) - a level, not an addition, so the two are never
   // sent together. Recom was captured writing parameters from two different
@@ -156,6 +183,14 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_TEXT_SENSOR(sub_state)
   SUB_TEXT_SENSOR(lockout)
   SUB_TEXT_SENSOR(blocking)
+
+  // The write path's two reporting entities. write_queue lists the staged edits
+  // ("p2=55, p33=6", or "empty"); write_result carries the verdict of whatever
+  // the write path last did, refusals included. Everything they say is in the log
+  // too - they exist so a write driven from Home Assistant reports back there
+  // rather than only to a console nobody has open.
+  SUB_TEXT_SENSOR(write_result)
+  SUB_TEXT_SENSOR(write_queue)
 
   // sample data - temperatures
   SUB_SENSOR(flow_temp)
@@ -299,9 +334,27 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // an EEPROM block index in 0x14..0x1B.
   bool write_block_unchanged(uint8_t block);
 
-  // Read-modify-write a single parameter. param is the pNN number from the map
-  // in mapping/pcu05_p3_protocol.md; value is clamped to that parameter's
-  // documented range, and the write is skipped when the boiler already holds it.
+  // Stage one parameter edit. param is the pNN number from the map in
+  // mapping/pcu05_p3_protocol.md; value must be inside that parameter's
+  // documented range - out of range is refused, not clamped, so a mistyped 30 for
+  // p33 writes nothing rather than quietly writing 15. Queueing a parameter that
+  // is already staged replaces its value rather than adding a second edit for the
+  // same byte. Nothing reaches the boiler until write_queue() is called, so this
+  // touches RAM only and is not gated behind allow_writes.
+  bool queue_param(uint8_t param, uint8_t value);
+
+  // Throw the staged edits away, writing nothing.
+  void clear_param_queue();
+
+  // Write every staged edit in one transaction, then empty the queue if - and
+  // only if - the write verified. A run that was refused or failed leaves the
+  // queue intact, so retrying it costs no retyping. An edit whose value the
+  // boiler already holds is dropped on the way past; a queue where every edit is
+  // already satisfied sends no write frame at all.
+  bool write_queue();
+
+  // Stage one edit and write it immediately: clear_param_queue(), queue_param()
+  // and write_queue() in one call, for a lambda that only ever changes one thing.
   bool write_param(uint8_t param, uint8_t value);
 
   // COMMAND 0x31, RESET, addressed to the PCU and sent on its own: no service
@@ -342,14 +395,18 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   //
   //   id(boiler).send_raw("02FE01050809522EA603");
   bool send_command(uint8_t dst, uint8_t cmd, uint8_t ext, const std::string &data_hex);
-  // The same thing from one string, so a single text box in Home Assistant can
-  // drive it: recipient, command, ext, then any payload bytes.
+  // The same thing from one string: recipient, command, ext, then any payload
+  // bytes. Deliberately not wired to anything in the YAML, and not to be - a text
+  // box in Home Assistant reaching this is raw frames crossing the HA boundary,
+  // which is the thing the parameter queue exists to avoid. It is a lambda-only
+  // escape hatch for probing a command whose shape is a guess.
   //
   //   "01 09 52"          factory unlock -> PCU
   //   "01 37 00 0C 00"    SERVICE_CODE with a two byte payload
   bool send_command_hex(const std::string &spec);
   bool send_raw(const std::string &hex);
 
+  void setup() override;
   void update() override;
   void loop() override;
   void dump_config() override;
@@ -374,17 +431,34 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   bool want_params_() const;
 
   // write path
-  bool stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_count, uint8_t byte_offset, uint8_t value,
-                  const char *what);
+  // The edits are read from edit_queue_ rather than passed in: a parameter write
+  // carries however many are staged, and every other kind of transaction none.
+  bool stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_count, const char *what);
+  // nullptr when this component will not write that parameter
+  static const ParamLimit *find_limit_(uint8_t param);
+  // Format a line, log it at the given level (0 info, 1 warning, 2 error) and
+  // publish it to the write_result text sensor. Every verdict the write path
+  // reaches goes through here, so the entity and the log cannot disagree.
+  void set_result_(uint8_t level, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+  void publish_write_queue_();
   void start_txn_();
   void finish_txn_();
   // jump to the re-lock, which start_txn_() leaves last but for the post-write
   // sample
   void skip_to_relock_();
   // True when the last sample shows a boiler that is not burning, not purging and
-  // not finishing a charge - the only state this component will rewrite the
-  // parameter block in. Reads the sample currently in data_, so it is only
+  // not finishing a charge. Reads the sample currently in data_, so it is only
   // meaningful straight after one has been decoded.
+  //
+  // This used to gate the write, and no longer does. Both p33 writes that put a
+  // PCU-05 P3 into Blocking 0 on 2026-09-16 went out to a boiler in
+  // 8:Controlled stop / 0:Standby - the gate passed on each occasion, correctly -
+  // and the cause turned out to be the image CRC the write was not maintaining.
+  // So it never prevented the fault it was added for, and the write goes out
+  // whatever the boiler is doing. What is left is worth recording rather than
+  // acting on: if a write ever does go wrong, the state it went out in is the
+  // first thing anybody will want from the log. See
+  // mapping/pcu05_p3_protocol.md, *What cleared it*.
   bool boiler_is_quiet_(const char **why) const;
   // Runs once, at the first write of a transaction: checks that every block was
   // read back cleanly, sanity-checks the image against the documented ranges and
@@ -481,6 +555,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
 
   // --- write path ---------------------------------------------------------
   bool allow_writes_{false};
+  bool write_enabled_{true};
   bool use_factory_mode_{false};
 
   // the one frame a DIETRICH_TXN_RAW transaction sends
@@ -491,12 +566,19 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   DietrichTxn pending_txn_{DIETRICH_TXN_NONE};
   uint8_t pending_first_block_{DIETRICH_PARAM_FIRST_BLOCK};
   uint8_t pending_block_count_{1};
-  uint8_t pending_byte_{0};  // offset into the 128 byte parameter block
-  uint8_t pending_value_{0};
+  // The staged edits, filled by queue_param() and applied by begin_write_phase_()
+  // once the image has been read. They deliberately outlive a failed transaction;
+  // see write_queue().
+  PendingEdit edit_queue_[DIETRICH_EDIT_QUEUE_MAX]{};
+  uint8_t edit_len_{0};
 
   // live for as long as a transaction is on the bus
   bool txn_active_{false};
   bool txn_failed_{false};
+  // Which step went wrong, recorded where it went wrong: by the time finish_txn_()
+  // composes the verdict the step is long gone, and "no reply to write 0x16" is a
+  // different problem from "no reply to service mode on". Empty when nothing has.
+  char txn_fail_step_[64]{};
   // Kept apart from txn_failed_ on purpose. The re-lock steps are last in the
   // queue, so by the time one of them goes wrong the write and its read-back
   // have already happened and their verdict still stands. Folding the two
@@ -506,11 +588,12 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   uint8_t txn_relock_tries_{0};
   bool txn_wrote_{false};  // at least one write was ACKed, so a verify is meaningful
   // The pre-flight sample, first in the queue of every write transaction, and the
-  // post-write one, last. Between them they answer two questions the old sequence
-  // could not: was the boiler quiet enough to be written to, and did a blocking
-  // code appear because it was written to. See start_txn_() and decode_sample_().
+  // post-write one, last. Between them they answer the question the old sequence
+  // could not: did a blocking code appear because the boiler was written to. A
+  // code read from the last ordinary poll can be 15 seconds stale, which is long
+  // enough to pin a pre-existing blocking on this write or miss one it caused.
+  // See start_txn_() and decode_sample_().
   bool txn_saw_preflight_{false};
-  bool txn_refused_busy_{false};
   uint8_t txn_blocking_before_{0xFF};
   bool txn_have_blocking_after_{false};
   uint8_t txn_blocking_after_{0xFF};

@@ -31,16 +31,26 @@ read-modify-write - and, more to the point, the refusals:
   unlock itself (Recom re-locks only in its success branch; that bug is
   deliberately not copied here - see `mapping/pcu05_p3_protocol.md`)
 - a write that is never ACKed is a failure, not a success (Recom's other bug)
-- values are clamped to the documented range, and parameters outside the
-  writable list - the gas/air settings and the controller-protection limits -
-  are refused outright
+- a value outside the documented range is **refused, not clamped**, and so is a
+  parameter outside the writable list - the gas/air settings and the
+  controller-protection limits
+- several queued edits ride in **one** transaction and cost exactly what one
+  edit does: eight block writes, one unlock pair, one EEPROM cycle
+- queueing a parameter twice replaces its value rather than staging two edits
+  for one byte, and a ninth edit is refused rather than dropping one silently
+- the queue survives a refusal or a failure, so a write that failed part-way
+  can be retried without restaging, and is emptied only by a write that reads
+  back verified
+- the write enable gate refuses a write without unlocking anything
 - writing a value the boiler already holds sends no write frame, because EEPROM
   endurance is finite
 - `allow_writes` and `variant: pcu05_p3` both gate the whole path
 - ordinary polling never unlocks service mode or writes anything
-- a boiler that is burning, purging or finishing a charge is **not** written to,
-  and the pre-flight sample that decides this is taken inside the transaction -
-  but one already in blocking mode is, because that is how a bad value gets undone
+- a boiler that is burning, purging or finishing a charge **is** written to, and
+  the pre-flight sample inside the transaction records what it was doing rather
+  than refusing. That gate is gone: both writes that put a PCU-05 P3 into
+  `Blocking 0` went out to a boiler the gate called quiet, so it never stood
+  between the write and the fault - the image CRC did
 - a blocking code that appears while the write runs is reported even when the
   write itself verified byte-for-byte
 - `reset_board()` sends `COMMAND 0x31` alone: no unlock, no read, no write

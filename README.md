@@ -130,35 +130,65 @@ dietrich:
   allow_writes: true
 ```
 
-There is no writable entity yet. The write path is reached from a YAML lambda,
-so Home Assistant only ever sees an ordinary button and sends “press” — no
-frame, byte or parameter value crosses the HA boundary, and the component builds
-and validates everything itself:
+Writes are driven by entities, not by a frame from Home Assistant. Two input
+boxes hold a parameter number and a value; a button stages that pair; a second
+button writes everything staged. Only the `pNN` number and the value ever cross
+the HA boundary — the component owns the list of parameters it is willing to
+write, each one's range, the read-modify-write, both image CRCs and the re-lock.
+See [katel.yaml](katel.yaml) for the whole block:
 
 ```yaml
 button:
   - platform: template
-    name: "Boiler set DHW hysteresis to 6"
+    name: "Boiler queue parameter"
     on_press:
-      - lambda: 'id(boiler).write_param(33, 6);'
+      - lambda: |-
+          id(boiler).queue_param((uint8_t) id(write_param_no).state,
+                                 (uint8_t) id(write_value).state);
+
+  - platform: template
+    name: "Boiler write queue to boiler"
+    on_press:
+      - lambda: 'id(boiler).write_queue();'
 ```
 
-`write_param(p, v)` takes the `pNN` number from the parameter table in
-[mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md). Two further entry
-points exist for bringing this up on a boiler for the first time, and
-[dietrich_pcu05_p3_en.yaml](dietrich_pcu05_p3_en.yaml) carries all three ready
-to uncomment, in the order they are worth trying:
+**Queue several edits and they all ride in one transaction.** A parameter write
+rewrites and re-verifies the whole 128-byte image whatever it is changing, so six
+queued edits cost exactly what one does — the same thirty-odd frames on the bus
+and the same single EEPROM cycle. Writing them one at a time would be six EEPROM
+cycles and six chances to provoke the blocking a write can bring on.
+
+Every verdict the write path reaches is published to a `write_result_text`
+sensor — refusals, progress and success alike — so the answer arrives in Home
+Assistant rather than only in the log. The verdict is a good half minute behind
+the press, so it reads `writing p2=55, p33=6...` first and lands on
+`write successful, verified by read-back: p2=55, p33=6` after. `write_queue_text`
+lists what is staged.
 
 | Method | What it does |
 |---|---|
+| `queue_param(p, v)` | stage one edit; refuses a parameter that is not writable or a value out of range |
+| `write_queue()` | write every staged edit in one transaction, and empty the queue only if it verifies |
+| `clear_param_queue()` | throw the staged edits away |
+| `write_param(p, v)` | stage one edit and write it immediately — the three above in one call |
 | `test_service_mode()` | unlock, read a sample back to confirm it engaged, re-lock |
 | `write_block_unchanged(blk)` | read an EEPROM block and write it back unchanged |
-| `write_param(p, v)` | read the whole parameter block, change one byte, refresh its CRCs, write it all back |
+
+`set_write_enabled(bool)` is a UI gate for a switch in Home Assistant, so a write
+cannot be set off by a stray press. It is *not* the safety boundary: that is
+`allow_writes`, which is compiled in and unreachable from Home Assistant.
 
 A parameter write is a single transaction that unlocks service mode, re-reads all
-eight EEPROM blocks, writes them all back with one byte changed, reads them back
-to verify and re-locks — and that re-lock happens whether or not the write
-succeeded. It writes the whole block because Recom does.
+eight EEPROM blocks, writes them all back with the staged bytes changed, reads
+them back to verify and re-locks — and that re-lock happens whether or not the
+write succeeded. It writes the whole block because Recom does.
+
+It does **not** wait for the boiler to be idle. It used to: both `p33` writes that
+put this PCU-05 P3 into `Blocking 0` on 2026-09-16 went out to a boiler in
+`8:Controlled stop` / `0:Standby`, so that gate passed on each occasion and never
+stood between the write and the fault — the image CRC below did. The transaction
+still opens with a sample, which records in the log what the boiler was doing and
+gives the blocking code a before-and-after to compare.
 
 It also **recomputes the two CRC16s the 128-byte parameter image carries over
 itself** — bytes 62–63 and 126–127 — because the PCU stores a set that fails them
@@ -170,9 +200,12 @@ written back, 58 documented parameters in the freshly read image are checked
 against their ranges - each block as it arrives, and the whole image again as the
 last gate - so a corrupted read is refused rather than returned to EEPROM. A
 transaction's reads go to a buffer of its own and reach the published sensors only
-once a write has verified, so a refused write leaves Home Assistant alone. Values
-are clamped to the documented range; a value the boiler already holds is not
-written at all, because EEPROM endurance is finite; and the gas/air settings
+once a write has verified, so a refused write leaves Home Assistant alone. A value
+outside the documented range is **refused, not clamped** — a 30 meant for p1 and
+typed into p33 writes nothing, rather than quietly writing 15 and reporting
+success. A value the boiler already holds is not written at all, because EEPROM
+endurance is finite, and a queue where every edit is already satisfied sends no
+write frame. The gas/air settings
 (p17-p21, p77, p78) and the controller-protection limits (p55-p57) are refused
 outright, because a bad write there is a combustion-safety problem rather than a
 comfort one.

@@ -568,9 +568,15 @@ together in the same state change at 14:23:28. Substatus 60 is the boiler shutti
 `p33 = 6` writes went out to a quiet boiler.
 
 `boiler_is_quiet_()` therefore cannot prevent this and never could: the gate passed on
-both occasions, correctly. It is kept because writing 128 bytes of live control settings
-into a burning boiler is a bad idea on its own merits, not because it addresses this
-fault.
+both occasions, correctly. **It has since been removed.** It was kept for a while on the
+general principle that writing 128 bytes of live control settings into a burning boiler
+is a bad idea on its own merits — but a full-block write returns every byte it is not
+changing verbatim, the gas/air and controller-protection parameters are not writable at
+all, and the PCU judges and adopts a stored set at its own checkpoint rather than
+reading EEPROM live. So the principle had nothing concrete behind it on this board, and
+the gate mostly meant a write refused for a reason unrelated to what went wrong. What
+survives is the pre-flight sample, which now records the boiler's state in the log
+instead of acting on it, and still gives the blocking code a before-and-after.
 
 ### What the PCU actually checks: the parameter image CRC
 
@@ -1006,14 +1012,16 @@ to ask a board what it makes of the command; nothing depends on it and it stays 
 
 The two `SAMPLES` are what *What cleared it* above cost:
 
-- **The first is a pre-flight.** The write goes out only when that sample shows a
-  boiler that is not burning and not part-way through a cycle: status in
-  {0, 8, 9, 10}, sub-status in {0, 1, 255}, fan stopped, no ionisation current.
-  Anything else and the transaction stops there, having unlocked nothing. A board
-  already in blocking or locking mode passes deliberately — that is the state you
-  need to write to it in to undo a bad value. The check is made on a sample taken
-  inside the transaction rather than on the last poll's, which can be 15 seconds
-  old, and 15 seconds is long enough for a burner to start.
+- **The first is a pre-flight.** It used to decide whether the write went out at
+  all — status in {0, 8, 9, 10}, sub-status in {0, 1, 255}, fan stopped, no
+  ionisation current, and anything else stopped the transaction there. That gate is
+  gone (see *What cleared it*): it passed on both writes that provoked `Blocking 0`,
+  so it was refusing writes for a reason unrelated to the fault. The sample stays,
+  for two things it is genuinely needed for: it logs what the boiler was doing when
+  the write went out, which is the first thing anybody will ask if one goes wrong,
+  and it reads the blocking code fresh. A code from the last ordinary poll can be 15
+  seconds stale, which is long enough to pin a pre-existing blocking on this write or
+  to miss one it caused.
 - **The last is a post-mortem.** The blocking code from the pre-flight sample is
   compared with the one after the re-lock, and any change is logged as an error
   even when the write verified byte-for-byte — because that is exactly what
@@ -1029,24 +1037,30 @@ go back to the boiler verbatim and a copy from the hourly parameter sweep could
 be stale. Neither Recom bug above is reproduced: any failed step — including a
 failure of the unlock itself — skips straight to the re-lock instead of carrying
 on, a missing response is a failure rather than a success, and a board found in
-service mode at boot (sample byte 62) is re-locked. Values are clamped to the
-ranges in the table below, the gas/air and controller-protection parameters are
-not writable at all, and a write is skipped outright when the freshly read block
-already holds the wanted value.
+service mode at boot (sample byte 62) is re-locked. A value outside the ranges in
+the table below is refused rather than clamped, the gas/air and
+controller-protection parameters are not writable at all, and an edit is dropped
+outright when the freshly read image already holds the wanted value.
 
 `tests/` drives all of that against a simulated PCU-05 P3 on a PC, with no
 hardware and no ESPHome involved; `./tests/run.sh` builds and runs it.
 
-Three entry points are callable from a YAML lambda, which is how a button in
-Home Assistant reaches them — see the commented-out section at the bottom of
-`dietrich_pcu05_p3_en.yaml`:
+These entry points are callable from a YAML lambda, which is how a button in Home
+Assistant reaches them — see the write section of `katel.yaml`:
 
 | Method | What it does |
 |---|---|
+| `queue_param(p, v)` | stage one edit, refusing an unwritable parameter or an out-of-range value |
+| `write_queue()` | write every staged edit in one transaction |
+| `clear_param_queue()` | throw the staged edits away |
+| `write_param(p, v)` | stage one edit and write it immediately |
 | `test_service_mode()` | unlock and immediately re-lock, writing nothing |
 | `write_block_unchanged(blk)` | read a block and write it back byte-for-byte |
-| `write_param(p, v)` | read-modify-write one parameter, clamped to its range |
 | `reset_board()` | `COMMAND 0x31` on its own — see below |
+
+Because a write returns the **whole** image whatever it is changing, a queue of
+edits costs exactly what a single edit does: one unlock pair, eight block writes,
+one EEPROM cycle. Changing six parameters one at a time would be six of each.
 
 `reset_board()` sends `RESET` to the PCU, unlocking nothing and touching no EEPROM.
 It is deliberately not part of `write_param()`: the only reason to want it is the

@@ -3,6 +3,7 @@ import esphome.config_validation as cv
 from esphome.components import binary_sensor, sensor, text_sensor, uart
 from esphome.const import (
     CONF_ID,
+    ENTITY_CATEGORY_DIAGNOSTIC,
     DEVICE_CLASS_OPENING,
     DEVICE_CLASS_RUNNING,
     DEVICE_CLASS_TEMPERATURE,
@@ -264,6 +265,18 @@ TEXT_SENSOR_SCHEMAS = {
     "sub_state_text": text_sensor.text_sensor_schema(),
     "lockout_text": text_sensor.text_sensor_schema(),
     "blocking_text": text_sensor.text_sensor_schema(),
+    # The write path reporting back where the writing is done. write_result
+    # carries the verdict of whatever the write path last did - "p33 refused:
+    # 30 is outside the documented range 2..15", "writing p2=55, p33=6...",
+    # "write successful, verified by read-back: p2=55" - and write_queue lists
+    # the staged edits. Neither needs allow_writes to be configured: reporting
+    # a refusal is most of what they are for.
+    "write_result_text": text_sensor.text_sensor_schema(
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    ),
+    "write_queue_text": text_sensor.text_sensor_schema(
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    ),
 }
 
 def _validate_writes(config):

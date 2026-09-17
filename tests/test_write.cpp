@@ -517,7 +517,7 @@ int main() {
     check(g_boiler.param_crc_ok(), "the image the boiler now holds matches its own CRCs");
     check(g_boiler.blocking == 0xFF, "no Blocking 0 - the PCU has a set it can adopt");
     check(!g_boiler.service_mode, "boiler left locked");
-    check(logged("parameter write verified: 8 block(s) from 0x14"), "verified by read-back");
+    check(logged("write successful, verified by read-back: p33=6"), "verified by read-back, and names what it wrote");
     bool one_address = !g_boiler.read_dests.empty();
     for (uint8_t a : g_boiler.read_dests)
       if (a != 0x00)
@@ -572,7 +572,7 @@ int main() {
     check(g_boiler.eeprom[2][0] == 6, "p33 was written");
     check(logged("re-lock got no usable reply, sending it again"), "the re-lock was resent");
     check(g_boiler.service_off == 3, "three CODE_SERVICE_STOP frames: the resend plus one per address");
-    check(logged("parameter write verified: 8 block(s) from 0x14"), "still reported as verified");
+    check(logged("write successful, verified by read-back"), "still reported as verified");
     check(!logged("parameter write failed"), "not reported as a failure");
     check(!g_boiler.service_mode && !g_boiler.service_mode_ee, "both addresses left locked");
     delete d;
@@ -586,7 +586,7 @@ int main() {
     check(d->write_param(33, 6), "request accepted");
     pump(*d, 800);
     check(g_boiler.eeprom[2][0] == 6, "p33 was written");
-    check(logged("parameter write verified: 8 block(s) from 0x14"),
+    check(logged("write successful, verified by read-back"),
           "a verified write survives a re-lock that went wrong after it");
     check(!logged("parameter write failed"), "the write is not what failed, so it is not called a failure");
     check(logged("an address may still be unlocked"), "the re-lock is reported on its own");
@@ -636,18 +636,28 @@ int main() {
     check(g_boiler.writes == 0, "no write frame sent at all");
     check(g_boiler.service_on == 2 && g_boiler.service_off == 2, "still unlocked and re-locked, both addresses");
     check(!g_boiler.service_mode, "boiler left locked");
-    check(logged("parameter already reads 4, skipping the write"), "skip reported");
+    check(logged("p33 already reads 4, dropping that edit"), "the edit is dropped by name");
+    check(logged("nothing written: the boiler already holds p33=4"), "and the run says why it wrote nothing");
     delete d;
   }
 
-  // -- 5. clamping and the whitelist ----------------------------------------
+  // -- 5. out of range and the whitelist ------------------------------------
   {
     begin("out-of-range and non-writable parameters");
     auto *d = make();
-    check(d->write_param(33, 99), "p33 = 99 accepted (to be clamped)");
+    // Refused, not clamped. The old behaviour pulled 99 to the documented max
+    // and wrote 15, which is the wrong answer for a value typed into a box: a 30
+    // meant for p1 and typed into p33 has to write nothing, not quietly write 15
+    // and report success.
+    check(!d->write_param(33, 99), "p33 = 99 refused rather than clamped");
+    check(logged("p33 refused: 99 is outside the documented range 2..15"), "refusal names the range");
     pump(*d);
-    check(g_boiler.eeprom[2][0] == 15, "clamped to the documented max of 15");
-    check(logged("p33: 99 is outside 2..15, clamped to 15"), "clamp reported");
+    check(g_boiler.writes == 0, "nothing written at all");
+    check(g_boiler.eeprom[2][0] == 4, "p33 still holds what it held");
+
+    g_log.clear();
+    check(!d->write_param(33, 1), "and the bottom end too");
+    check(logged("outside the documented range 2..15"), "refusal names the range");
 
     g_log.clear();
     check(!d->write_param(17, 50), "p17 (full load HTG, gas/air) refused");
@@ -658,6 +668,100 @@ int main() {
 
     g_log.clear();
     check(!d->write_block_unchanged(0x1C), "identity write outside 0x14..0x1B refused");
+    delete d;
+  }
+
+  // -- 5a. several edits ride in one transaction -----------------------------
+  {
+    begin("a queue of edits is written in a single transaction");
+    auto *d = make();
+    check(d->queue_param(2, 55), "p2 staged");
+    check(logged("p2=55 staged, 1 edit(s) waiting"), "staging reported");
+    check(d->queue_param(33, 6), "p33 staged");
+    check(g_boiler.writes == 0, "queueing writes nothing on its own");
+
+    check(d->write_queue(), "the write is accepted");
+    check(logged("writing p2=55, p33=6..."), "and says what it is about to do while it runs");
+    pump(*d);
+    check(g_boiler.eeprom[0][1] == 55, "p2 took");
+    check(g_boiler.eeprom[2][0] == 6, "p33 took");
+    // The whole image goes back whatever is being changed, so two edits cost
+    // exactly what one does - which is the entire reason for the queue.
+    check(g_boiler.writes == 8, "one transaction, eight block writes, same as a single edit");
+    check(g_boiler.service_on == 2, "both addresses unlocked once, not once per edit");
+    check(logged("write successful, verified by read-back: p2=55, p33=6"), "both are named in the verdict");
+    check(!g_boiler.service_mode, "boiler left locked");
+    delete d;
+  }
+
+  // -- 5b. the queue, and what empties it ------------------------------------
+  {
+    begin("queue handling");
+    auto *d = make();
+    check(!d->write_queue(), "an empty queue is not a write");
+    check(logged("nothing to write: the queue is empty"), "refusal explains why");
+
+    g_log.clear();
+    check(d->queue_param(33, 6), "p33 = 6 staged");
+    check(d->queue_param(33, 9), "p33 staged again");
+    check(logged("p33 restaged: 9 replaces 6"), "the second value replaces the first");
+
+    g_log.clear();
+    d->clear_param_queue();
+    check(logged("queue cleared, nothing staged"), "clearing is reported");
+    check(!d->write_queue(), "and really did empty it");
+
+    // Eight is the cap; the ninth is refused rather than dropping one silently.
+    g_log.clear();
+    const uint8_t params[9] = {1, 2, 3, 4, 5, 23, 25, 26, 31};
+    const uint8_t values[9] = {60, 55, 2, 1, 10, 80, 20, 30, 1};
+    for (int i = 0; i < 8; i++)
+      check(d->queue_param(params[i], values[i]), "edit staged");
+    check(!d->queue_param(params[8], values[8]), "the ninth is refused");
+    check(logged("the queue is full at 8 edits"), "refusal explains why");
+    delete d;
+  }
+
+  // -- 5c. a failed write keeps its queue ------------------------------------
+  {
+    begin("the queue survives a failure");
+    auto *d = make();
+    // The boiler goes silent on the in-transaction read, so no write frame is
+    // sent at all and the transaction fails on its way to the re-lock.
+    g_boiler.answer_reads = false;
+    check(d->queue_param(33, 6), "p33 staged");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d, 800);
+    check(g_boiler.writes == 0, "nothing written");
+
+    // The point of keeping it: retrying costs no retyping.
+    g_log.clear();
+    g_boiler.answer_reads = true;
+    check(d->write_queue(), "the same queue can be written again without restaging");
+    pump(*d);
+    check(g_boiler.eeprom[2][0] == 6, "and this time it took");
+    check(!d->write_queue(), "a verified write empties the queue");
+    check(logged("nothing to write: the queue is empty"), "the queue really is empty afterwards");
+    delete d;
+  }
+
+  // -- 5d. the write enable gate ---------------------------------------------
+  {
+    begin("the write enable switch");
+    auto *d = make();
+    d->set_write_enabled(false);
+    check(d->queue_param(33, 6), "queueing is allowed with the gate shut - it writes nothing");
+    check(!d->write_queue(), "the write is refused");
+    check(logged("refused: the write enable switch is off"), "refusal explains why");
+    pump(*d);
+    check(g_boiler.writes == 0, "nothing written");
+    check(g_boiler.service_on == 0, "and nothing was even unlocked");
+
+    g_log.clear();
+    d->set_write_enabled(true);
+    check(d->write_queue(), "and it goes through once the gate is open");
+    pump(*d);
+    check(g_boiler.eeprom[2][0] == 6, "p33 took");
     delete d;
   }
 
@@ -692,7 +796,7 @@ int main() {
     check(memcmp(before, g_boiler.eeprom[2], 16) == 0, "EEPROM untouched");
     check(g_boiler.service_off == 2, "both re-locks still sent");
     check(!g_boiler.service_mode, "boiler left locked after the failure");
-    check(logged("failed; service mode was re-locked"), "failure reported");
+    check(logged("parameter write failed: no ACK for param 0x14"), "failure reported, and the step named");
     delete d;
   }
 
@@ -705,7 +809,8 @@ int main() {
     pump(*d, 800);
     check(g_boiler.service_off == 2, "both re-locks still sent");
     check(!g_boiler.service_mode, "boiler left locked after the failure");
-    check(logged("failed; service mode was re-locked"), "treated as a failure, not a success");
+    check(logged("parameter write failed: no ACK for write 0x14"),
+          "treated as a failure, not a success, and the step named");
     delete d;
   }
 
@@ -890,38 +995,41 @@ int main() {
 
   // -- 15. the write waits for a quiet boiler --------------------------------
   {
-    begin("a burning boiler is not written to");
+    begin("a burning boiler is written to, and the state is recorded");
     auto *d = make();
     g_boiler.status = 4;      // burning DHW
     g_boiler.substatus = 32;  // normal power control
     g_boiler.fan = 4200;
     g_boiler.ionisation = 62;
-    check(d->write_param(33, 6), "request accepted - the boiler has not been asked yet");
+    check(d->write_param(33, 6), "request accepted");
     pump(*d);
-    check(g_boiler.writes == 0, "no write frame was sent");
-    check(g_boiler.service_on == 0, "and service mode was never unlocked");
-    check(g_boiler.eeprom[2][0] == 4, "EEPROM untouched");
-    check(logged("write refused: the boiler is running"), "the pre-flight sample says why");
-    check(logged("refused: the boiler was not quiet enough"), "and the transaction reports itself refused");
+    // The gate this used to assert is gone. Both writes that put a PCU-05 P3 into
+    // Blocking 0 on 2026-09-16 went out to a boiler in 8:Controlled stop /
+    // 0:Standby, so the gate passed on each occasion and never stood between the
+    // write and the fault; the image CRC did. What is left is the log line.
+    check(g_boiler.writes == 8, "the write went out anyway");
+    check(g_boiler.eeprom[2][0] == 6, "and it took");
+    check(logged("write going out while the boiler is running"), "the pre-flight sample records the state");
+    check(logged("state 4, sub state 32, fan 4200 rpm, ionisation 62"), "with the numbers behind it");
     delete d;
   }
 
   // -- 15b. the exact state the 2026-09-16 write went out in ------------------
   {
-    begin("a boiler finishing a charge is not written to either");
+    begin("a boiler finishing a charge is written to too");
     auto *d = make();
     g_boiler.status = 8;      // controlled stop - the burner is already off
     g_boiler.substatus = 60;  // ...but the pump is still running it out
     check(d->write_param(33, 6), "request accepted");
     pump(*d);
-    check(g_boiler.writes == 0, "no write frame was sent");
-    check(logged("part-way through a cycle"), "the sub state is what gives it away");
+    check(g_boiler.writes == 8, "the write went out");
+    check(logged("part-way through a cycle"), "and the sub state is what the log names");
     delete d;
   }
 
-  // -- 15c. anti-cycling is quiet enough --------------------------------------
+  // -- 15c. the anti-cycle wait --------------------------------------------
   {
-    begin("a boiler in the anti-cycle wait is quiet enough");
+    begin("a boiler in the anti-cycle wait is written to without comment");
     auto *d = make();
     g_boiler.status = 8;
     g_boiler.substatus = 1;  // anti-cycling
@@ -929,6 +1037,7 @@ int main() {
     pump(*d, 900);
     check(g_boiler.writes == 8, "the whole parameter block was written");
     check(g_boiler.eeprom[2][0] == 6, "and it took effect");
+    check(!logged("write going out while"), "and nothing was said about the state, because it is idle");
     delete d;
   }
 
@@ -953,7 +1062,7 @@ int main() {
     check(d->write_param(33, 6), "request accepted");
     pump(*d, 900);
     check(g_boiler.eeprom[2][0] == 6, "the write landed");
-    check(logged("parameter write verified"), "and verified byte-for-byte");
+    check(logged("write successful, verified by read-back"), "and verified byte-for-byte");
     check(logged("blocking code went 255 -> 20"), "the post-write sample reports the blocking anyway");
     check(logged("mains power cycle"), "and says what clears it");
     delete d;
