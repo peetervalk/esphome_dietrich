@@ -221,10 +221,13 @@ static const ParamLimit PARAM_LIMITS[] = {
     {30, 29, -30, 0},   // Min outside temperature for frost protection
     {61, 60, -100, 100},  // Offset control temp, tenths of a degree
     {86, 85, -30, 20},  // Offset when warming up for DHW comfort
-    // The four below sit in the image's *upper* half, so a write to any of them
-    // refreshes the CRC at bytes 126..127 rather than the one at 62..63. That the
-    // upper half is protected the same way is certain - the stored CRC checks out
-    // on every dump - but no writer has been observed maintaining it: Recom's
+    // The five below, and p86 just above, sit in the image's *upper* half - six
+    // in all - so a write to any of them refreshes the CRC at image bytes
+    // 126..127 rather than the one at image bytes 62..63. Image bytes: the sample
+    // frame's 62 and 63 are the service mode flags and have nothing to do with
+    // this. That the upper half is protected the same way is certain - the stored
+    // CRC checks out on every dump - but no writer has been observed maintaining
+    // it: Recom's
     // parameter screens stop at p44 on this board and its EEPROM menu is greyed
     // out, so it cannot be made to write here at all. Writing one of these is the
     // experiment that settles it. See mapping/pcu05_p3_protocol.md.
@@ -782,43 +785,59 @@ void Dietrich::decode_sample_() {
   this->pub_u16_(this->hmi_active_sensor_, 58);
   this->pub_s8_(this->ch_setpoint_hmi_sensor_, 60);
   this->pub_s8_(this->dhw_setpoint_hmi_sensor_, 61);
+  // Sample bytes 62 and 63 - and the one place in this component where a byte
+  // number means two different things, so it is worth spelling out once:
+  //
+  //   sample frame      the status payload the boiler answers a SAMPLE request
+  //                     with. Every offset in this function indexes it. Its
+  //                     bytes 62 and 63 are the two flags published below.
+  //   parameter image   a different payload entirely: 128 bytes assembled from
+  //                     EEPROM blocks 0x14..0x1B, decoded in decode_params_().
+  //                     Its bytes 62 and 63 are not a setting at all but the
+  //                     CRC16 over image bytes 0..61 - see apply_param_crcs_().
+  //
+  // Two address spaces, no relation, neither derived from the other. Where a bare
+  // number could be read either way, this file writes "sample byte N" or "image
+  // byte N".
   this->pub_u8_(this->service_mode_sensor_, 62, 1.0f);
   this->pub_u8_(this->rs232_mode_sensor_, 63, 1.0f);
 
   // A reset partway through a write transaction leaves service mode on
-  // indefinitely, so check once at boot and re-lock if it is. Byte 62 reports the
-  // current state. Gated on allow_writes: re-locking a board that somebody else
+  // indefinitely, so check once at boot and re-lock if it is. Sample byte 63 is
+  // what reports the current state - not 62, for the reason in the next
+  // paragraph. Gated on allow_writes: re-locking a board that somebody else
   // deliberately unlocked is not this component's business otherwise.
   // Reached only from inside a service mode test; see start_txn_().
   //
-  // The P3 map labels byte 62 `service_mode` and byte 63 `rs232_mode`, but on a
-  // live PCU-05 P3 it is **byte 63** that goes 0 -> 1 for exactly the duration of
-  // the CODE_SERVICE_START / CODE_SERVICE_STOP window, while byte 62 stays 0
-  // throughout. Diffing a sample taken inside the window against one taken three
-  // seconds later shows byte 63 and nothing else but drifting temperatures. So
-  // byte 63 is the flag to trust here, whatever the map calls it - plausibly the
-  // board considers the service command to be putting it under RS232/PC control.
+  // The P3 map labels sample byte 62 `service_mode` and sample byte 63
+  // `rs232_mode`, but on a live PCU-05 P3 it is **sample byte 63** that goes
+  // 0 -> 1 for exactly the duration of the CODE_SERVICE_START /
+  // CODE_SERVICE_STOP window, while sample byte 62 stays 0 throughout. Diffing a
+  // sample taken inside the window against one taken three seconds later shows
+  // byte 63 and nothing else but drifting temperatures. So byte 63 is the flag to
+  // trust here, whatever the map calls it - plausibly the board considers the
+  // service command to be putting it under RS232/PC control.
   if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_SERVICE_TEST && this->have_(63, 1)) {
     const unsigned b62 = this->d_(62), b63 = this->d_(63);
     if (b63 != 0) {
-      ESP_LOGI(TAG, "service mode readback: byte 62 = %u, byte 63 = %u - the unlock took effect", b62, b63);
+      ESP_LOGI(TAG, "service mode readback: sample byte 62 = %u, byte 63 = %u - the unlock took effect", b62, b63);
     } else {
       ESP_LOGE(TAG,
-               "service mode readback: byte 62 = %u, byte 63 = 0 - the unlock was ACKed but did NOT "
+               "service mode readback: sample byte 62 = %u, byte 63 = 0 - the unlock was ACKed but did NOT "
                "take effect, EEPROM writes will be ignored",
                b62);
     }
   }
 
   // The same readback for the factory-level unlock, and deliberately without a
-  // verdict. Byte 63 is known to track CODE_SERVICE; nothing is known to track
-  // CODE_FACTORY, and byte 62 - which the P3 map calls service_mode and which has
-  // never been seen to move - is the obvious candidate but only a candidate. So
-  // report both bytes and let the reading decide what the command did. If byte 62
-  // moves here, that is the finding.
+  // verdict. Sample byte 63 is known to track CODE_SERVICE; nothing is known to
+  // track CODE_FACTORY, and sample byte 62 - which the P3 map calls service_mode
+  // and which has never been seen to move - is the obvious candidate but only a
+  // candidate. So report both bytes and let the reading decide what the command
+  // did. If sample byte 62 moves here, that is the finding.
   if (this->txn_active_ && this->txn_kind_ == DIETRICH_TXN_FACTORY_TEST && this->have_(63, 1)) {
     ESP_LOGI(TAG,
-             "factory mode readback: byte 62 = %u, byte 63 = %u (62 is the candidate flag, 63 is the one "
+             "factory mode readback: sample byte 62 = %u, byte 63 = %u (62 is the candidate flag, 63 is the one "
              "CODE_SERVICE moves)",
              static_cast<unsigned>(this->d_(62)), static_cast<unsigned>(this->d_(63)));
   }
@@ -1118,12 +1137,17 @@ bool Dietrich::block_is_sane_(size_t blk) const {
   return true;
 }
 
-// The two CRCs the image carries over itself. Recom recomputes them inside every
-// parameter write - the block holding the CRC goes back changed even when no
-// parameter in it did - and a set whose CRC does not match is stored by the PCU
-// and then not adopted, which is what Blocking 0 (*PCU parameter fault*) names.
-// Captured 2026-09-16, mapping/260916_2303.pcapng: p33 4 -> 5 moved bytes 62,63
-// from 8f 05 to 8e 55, and p2 56 -> 55 moved them on to 9a 50.
+// The two CRCs the image carries over itself, at image bytes 62..63 and 126..127.
+// Image bytes throughout: the sample frame has a byte 62 and a byte 63 as well,
+// and there they are the service_mode / rs232_mode flags decode_sample_()
+// publishes. Separate payload, no CRC of its own, no relation.
+//
+// Recom recomputes both inside every parameter write - the block holding a CRC
+// goes back changed even when no parameter in it did - and a set whose CRC does
+// not match is stored by the PCU and then not adopted, which is what Blocking 0
+// (*PCU parameter fault*) names. Captured 2026-09-16, mapping/260916_2303.pcapng:
+// p33 4 -> 5 moved image bytes 62,63 from 8f 05 to 8e 55, and p2 56 -> 55 moved
+// them on to 9a 50.
 void Dietrich::apply_param_crcs_(uint8_t *image) {
   for (size_t half = 0; half < DIETRICH_PARAM_BYTES; half += DIETRICH_PARAM_HALF) {
     const uint16_t crc = crc16_(image, half, half + DIETRICH_PARAM_CRC_SPAN);

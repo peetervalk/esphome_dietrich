@@ -91,11 +91,17 @@ static const size_t DIETRICH_PARAM_BYTES = DIETRICH_PARAM_BLOCKS * DIETRICH_PARA
 // EEPROM block indices the parameter block occupies, used as the EXT_COMMAND byte
 static const uint8_t DIETRICH_PARAM_FIRST_BLOCK = 0x14;
 static const uint8_t DIETRICH_PARAM_LAST_BLOCK = 0x1B;
-// The image protects itself with a CRC16 per 64 byte half: bytes 62..63 cover
-// bytes 0..61 and bytes 126..127 cover bytes 64..125, same poly and init as the
-// frame CRC, stored LSB first. The PCU checks them, and a set whose CRC does not
-// match is stored but never adopted - that is Blocking 0. Captured off Recom
-// making two parameter writes, mapping/260916_2303.pcapng.
+// The image protects itself with a CRC16 per 64 byte half: image bytes 62..63
+// cover image bytes 0..61, and image bytes 126..127 cover image bytes 64..125,
+// same poly and init as the frame CRC, stored LSB first. The PCU checks them, and
+// a set whose CRC does not match is stored but never adopted - that is Blocking 0.
+// Captured off Recom making two parameter writes, mapping/260916_2303.pcapng.
+//
+// "Image bytes" is spelled out because the sample frame - the status payload the
+// boiler answers a SAMPLE with, and what every other offset in this component
+// indexes - has its own byte 62 and byte 63, and there they are the service_mode
+// and rs232_mode flags. The image is params_ / txn_image_ below; the sample is
+// what decode_sample_() reads. Nothing indexes both.
 static const size_t DIETRICH_PARAM_HALF = 64;
 static const size_t DIETRICH_PARAM_CRC_SPAN = 62;
 // STX + 6 header bytes + 16 data bytes + CRC16 + ETX
@@ -334,7 +340,9 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // and the variant is pcu05_p3, and only one can be in flight at a time.
 
   // Unlock service mode and immediately re-lock it, writing nothing at all.
-  // Sample byte 62 reports the state, so this tests the unlock path at no risk.
+  // Sample byte 63 reports the state - the P3 map calls that one rs232_mode, but
+  // it is the one that moves; see decode_sample_(). So this tests the unlock path
+  // at no risk.
   bool test_service_mode();
 
   // Read one EEPROM block and write it back byte-for-byte unchanged, which

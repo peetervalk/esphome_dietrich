@@ -445,7 +445,7 @@ int main() {
     check(g_boiler.service_off == 1, "CODE_SERVICE_STOP sent once");
     check(!g_boiler.service_mode, "boiler left locked");
     check(g_boiler.writes == 0, "nothing written to EEPROM");
-    check(logged("the unlock took effect"), "service mode confirmed on from sample byte 62");
+    check(logged("the unlock took effect"), "service mode confirmed on from sample byte 63");
     check(logged("service mode test finished, nothing was written"), "reported as a clean no-write run");
     delete d;
   }
@@ -457,7 +457,7 @@ int main() {
     g_boiler.service_mode_engages = false;
     check(d->test_service_mode(), "request accepted");
     pump(*d);
-    check(logged("did NOT take effect"), "detected from sample byte 62, not from the ACK");
+    check(logged("did NOT take effect"), "detected from sample byte 63, not from the ACK");
     delete d;
   }
 
@@ -983,7 +983,7 @@ int main() {
     auto *d = make();
     g_boiler.service_mode = true;
     // the first poll after boot is a counter poll (counter_timer_ starts at 99),
-    // so it takes a second interval before a sample carries byte 62
+    // so it takes a second interval before a sample carries byte 63
     for (int i = 0; i < 3; i++) {
       d->update();
       pump(*d, 150);
@@ -1232,7 +1232,8 @@ int main() {
     check(!g_boiler.factory_mode && !g_boiler.factory_mode_ee, "boiler left locked");
     check(g_boiler.service_on == 0, "the service-level unlock was not sent");
     check(g_boiler.writes == 0 && g_boiler.reads == 0, "nothing read, nothing written");
-    check(logged("factory mode readback: byte 62 = 1"), "the sample taken inside the window is reported");
+    check(logged("factory mode readback: sample byte 62 = 1"),
+          "the sample taken inside the window is reported");
     delete d;
   }
 

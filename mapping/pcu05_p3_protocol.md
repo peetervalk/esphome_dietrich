@@ -593,6 +593,16 @@ that the difference was *service* versus *factory* level — was wrong.
 | 62–63 | bytes 0–61 | block `0x17`, offsets 14–15 |
 | 126–127 | bytes 64–125 | block `0x1B`, offsets 14–15 |
 
+> **Image bytes, not sample bytes.** Byte numbers on this page belong to whichever
+> payload the section is about, and two of them collide. The *parameter image* is the
+> 128 bytes assembled from EEPROM blocks `0x14`–`0x1B`; its bytes 62 and 63 are the
+> CRC above. The *sample frame* is the status payload a SAMPLE request answers with,
+> and its bytes 62 and 63 are the `service_mode` / `rs232_mode` flags of
+> [*Service mode engages, and it is reported by byte 63, not byte 62*](#service-mode-engages-and-it-is-reported-by-byte-63-not-byte-62).
+> Different payloads, no relation; the sample has no CRC of its own beyond the frame
+> trailer. The component writes “sample byte N” or “image byte N” wherever the bare
+> number would be ambiguous.
+
 Same CRC as everywhere else on this board — poly `0xA001`, init `0xFFFF`, stored LSB
 first. On the image this boiler was running when the capture starts:
 

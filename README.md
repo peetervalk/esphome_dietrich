@@ -130,21 +130,37 @@ dietrich:
   allow_writes: true
 ```
 
-Writes are driven by entities, not by a frame from Home Assistant. Two input
-boxes hold a parameter number and a value; a button stages that pair; a second
-button writes everything staged. Only the `pNN` number and the value ever cross
-the HA boundary — the component owns the list of parameters it is willing to
-write, each one's range, the read-modify-write, both image CRCs and the re-lock.
-See [katel.yaml](katel.yaml) for the whole block:
+Writes are driven by entities, not by a frame from Home Assistant. A dropdown
+holds the parameter — listing only the ones the component is willing to write,
+each with its range — and a box holds the value; a button stages that pair; a
+second button writes everything staged. Only the `pNN` number and the value ever
+cross the HA boundary, and the dropdown is a convenience rather than the
+authority: `queue_param()` re-checks both in the firmware, so a stale list
+produces a refusal with a reason and never a bad write. The component owns the
+rest — the writable list, each range, the read-modify-write, both image CRCs and
+the re-lock. See [katel.yaml](katel.yaml) for the whole block:
 
 ```yaml
+select:
+  - platform: template
+    name: "Write parameter"
+    id: write_param_sel
+    optimistic: true
+    initial_option: "p33 - DHW hysteresis, cut-in below tank setpoint (2..15)"
+    options:
+      - "p1 - max CH flow temp (20..90)"
+      - "p2 - DHW tank setpoint (40..65)"
+      # ...twenty-two in all
+
 button:
   - platform: template
     name: "Boiler queue parameter"
     on_press:
       - lambda: |-
-          id(boiler).queue_param((uint8_t) id(write_param_no).state,
-                                 (uint8_t) id(write_value).state);
+          // Every option starts "p<N>"; strtol stops at the first non-digit.
+          const std::string &sel = id(write_param_sel).state;
+          id(boiler).queue_param((uint8_t) strtol(sel.c_str() + 1, nullptr, 10),
+                                 (int) id(write_value).state);
 
   - platform: template
     name: "Boiler write queue to boiler"

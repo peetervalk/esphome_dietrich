@@ -353,20 +353,60 @@ button:
 #     turn_off_action:
 #       - lambda: 'id(boiler).set_write_enabled(false);'
 #
-# number:
-#   # `number` rather than `text` so Home Assistant itself will not hand over
-#   # something that is not a whole number; `mode: box` makes them type-in boxes
-#   # rather than sliders. The component checks both against its parameter map
-#   # regardless - that is where the real answer comes from.
+# select:
+#   # The writable list and nothing else - the component refuses every other
+#   # parameter anyway, so a free-text box could only ever produce typos. Each
+#   # option carries its documented range, because the value box below cannot
+#   # narrow itself per parameter: it has to span -100..255 to cover all of them,
+#   # so the range you are allowed has to be readable at the moment you pick.
+#   #
+#   # Only the leading "p<N>" is parsed. The rest of each line is for you, which
+#   # also means this list is a convenience and not the authority - queue_param()
+#   # re-checks the number and the range in the firmware. A list gone stale against
+#   # a newer component therefore produces a refusal with a reason, never a bad
+#   # write.
+#   #
+#   # * marks the six that live in the image's upper half. That half carries its
+#   #   own CRC at image bytes 126..127, which this component maintains, but no
+#   #   other writer has been seen maintaining it - Recom's parameter screens stop
+#   #   at p44 on this board and its EEPROM menu is greyed out. Writing one of
+#   #   these is the experiment that settles whether anything else cares, so watch
+#   #   "Write result" and the blocking code after.
 #   - platform: template
 #     name: "Boiler write parameter"
-#     id: write_param_no
+#     id: write_param_sel
 #     optimistic: true
-#     min_value: 1
-#     max_value: 120
-#     step: 1
-#     mode: box
 #     entity_category: config
+#     initial_option: "p33 - DHW hysteresis, cut-in below tank setpoint (2..15)"
+#     options:
+#       - "p1 - max CH flow temp (20..90)"
+#       - "p2 - DHW tank setpoint (40..65)"
+#       - "p3 - boiler controls, CH/DHW on/off (0..3)"
+#       - "p4 - comfort DHW, always on/off/controller (0..2)"
+#       - "p5 - pump post-run CH, minutes, 99 = always (0..99)"
+#       - "p23 - max system flow temp (20..90)"
+#       - "p25 - curve footpoint outside temp (0..30)"
+#       - "p26 - curve footpoint flow temp (0..90)"
+#       - "p27 - curve cold-end outside temp (-30..0)"
+#       - "p28 - pump CH min speed, 2..10 means 20..100 %"
+#       - "p29 - pump CH max speed, 2..10 means 20..100 %"
+#       - "p30 - min outside temp, frost protection (-30..0)"
+#       - "p31 - anti legionella (0..2)"
+#       - "p32 - setpoint raise while charging the tank (0..25)"
+#       - "p33 - DHW hysteresis, cut-in below tank setpoint (2..15)"
+#       - "p61 - offset control temp, tenths of a degree (-100..100)"
+#       - "p73 - CH hysteresis (1..10) *"
+#       - "p85 - hysteresis warming up, DHW comfort (0..20) *"
+#       - "p86 - offset warming up, DHW comfort (-30..20) *"
+#       - "p88 - DHW hysteresis, combi/flow-through only (1..10) *"
+#       - "p105 - tank switch-off offset (0..10) *"
+#       - "p106 - DHW pump switch-on delay (-20..20) *"
+#
+# number:
+#   # `number` rather than `text` so Home Assistant itself will not hand over
+#   # something that is not a whole number; `mode: box` makes it a type-in box
+#   # rather than a slider. The component checks it against the selected
+#   # parameter's range regardless - that is where the real answer comes from.
 #
 #   # Negative values are real: p27, p30, p61, p86 and p106 are stored two's
 #   # complement, and the manual gives it as "setting value - 256 = desired
@@ -392,7 +432,10 @@ button:
 #     entity_category: config
 #     on_press:
 #       - lambda: |-
-#           id(boiler).queue_param((uint8_t) id(write_param_no).state,
+#           // Every option starts "p<N>". Skip the p, and strtol stops at the
+#           // first non-digit, which is the rest of the line.
+#           const std::string &sel = id(write_param_sel).state;
+#           id(boiler).queue_param((uint8_t) strtol(sel.c_str() + 1, nullptr, 10),
 #                                  (int) id(write_value).state);
 #
 #   # Everything staged, in one transaction. Refused unless the write enable
