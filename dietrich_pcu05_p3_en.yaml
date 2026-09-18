@@ -5,7 +5,7 @@
 # component decodes. This component targets that board and that parameter set
 # only - see the README if yours is an MCR3 or an Avanta/Calenta.
 #
-# Board here is an ESP32 DevKit V4; for a Wemos D1 (ESP8266) swap the `esp32:`
+# Board here is an ESP32 DevKit-C V4; for a Wemos D1 (ESP8266) swap the `esp32:`
 # block for:
 #   esp8266:
 #     board: d1_mini
@@ -21,10 +21,6 @@ wifi:
   ssid: "ssid"
   password: "password"
 
-# NOTE (ESP32): keep the logger on its default UART0/USB console. Do NOT use
-# `hardware_uart: UART1` - on classic ESP32 boards UART1 defaults to
-# GPIO9/GPIO10, which are wired to the internal SPI flash, and touching them
-# crashes the board in a boot loop (see issue #7).
 logger:
 
 web_server:
@@ -40,12 +36,15 @@ external_components:
   # or locally, when this YAML lives inside a clone of the repository:
   # - source: components
 
-# Boiler bus on UART2 (GPIO16/GPIO17) - leaves UART0 free for the USB console
+# Boiler bus on GPIO18/GPIO19, leaving the USB console alone. ESPHome routes
+# whichever pins you name through the ESP32's UART matrix, so there is no need to
+# pick a hardware UART or stay on its nominal pins. Avoid GPIO16/GPIO17: they look
+# like the obvious choice and are wired to the PSRAM on WROVER modules.
 uart:
   id: uart_bus
   baud_rate: 9600
-  tx_pin: GPIO17
-  rx_pin: GPIO16
+  tx_pin: GPIO18
+  rx_pin: GPIO19
 
 dietrich:
   # needed only so the bring-up buttons at the bottom can reach the component

@@ -29,8 +29,8 @@ external_components:
 uart:
   id: uart_bus
   baud_rate: 9600
-  tx_pin: GPIO17
-  rx_pin: GPIO16
+  tx_pin: GPIO18
+  rx_pin: GPIO19
 
 dietrich:
   uart_id: uart_bus
@@ -142,13 +142,34 @@ rest — the writable list, each range, the read-modify-write, both image CRCs a
 the re-lock. See [katel.yaml](katel.yaml) for the whole block:
 
 ```yaml
+globals:
+  # The parameter number behind the dropdown, parsed when the selection changes
+  # rather than read out of the select inside the button's lambda: `.state` is
+  # gone from `select::Select` on ESPHome 2025.x, whereas the `x` handed to
+  # on_value has been stable for years. 0 is not a writable parameter, so a
+  # Queue pressed before anything is picked is refused rather than acting on a
+  # default.
+  - id: write_param_no
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+
 select:
   - platform: template
     name: "Write parameter"
     id: write_param_sel
     optimistic: true
-    initial_option: "p33 - DHW hysteresis, cut-in below tank setpoint (2..15)"
+    initial_option: "(nothing selected)"
+    on_value:
+      - lambda: |-
+          // Every option starts "p<N>". Skip the p and take digits until the
+          // description begins.
+          uint8_t n = 0;
+          for (size_t i = 1; i < x.size() && x[i] >= '0' && x[i] <= '9'; i++)
+            n = (uint8_t) (n * 10 + (x[i] - '0'));
+          id(write_param_no) = n;
     options:
+      - "(nothing selected)"
       - "p1 - max CH flow temp (20..90)"
       - "p2 - DHW tank setpoint (40..65)"
       # ...twenty-two in all
@@ -158,10 +179,7 @@ button:
     name: "Boiler queue parameter"
     on_press:
       - lambda: |-
-          // Every option starts "p<N>"; strtol stops at the first non-digit.
-          const std::string &sel = id(write_param_sel).state;
-          id(boiler).queue_param((uint8_t) strtol(sel.c_str() + 1, nullptr, 10),
-                                 (int) id(write_value).state);
+          id(boiler).queue_param(id(write_param_no), (int) id(write_value).state);
 
   - platform: template
     name: "Boiler write queue to boiler"
@@ -200,12 +218,8 @@ eight EEPROM blocks, writes them all back with the staged bytes changed, reads
 them back to verify and re-locks — and that re-lock happens whether or not the
 write succeeded. It writes the whole block because Recom does.
 
-It does **not** wait for the boiler to be idle. It used to: both `p33` writes that
-put this PCU-05 P3 into `Blocking 0` on 2026-09-16 went out to a boiler in
-`8:Controlled stop` / `0:Standby`, so that gate passed on each occasion and never
-stood between the write and the fault — the image CRC below did. The transaction
-still opens with a sample, which records in the log what the boiler was doing and
-gives the blocking code a before-and-after to compare.
+The transaction opens with a sample, which records in the log what the boiler was doing 
+before the write and in case of a blocking code gives a before-and-after to compare.
 
 It also **recomputes the two CRC16s the 128-byte parameter image carries over
 itself** — bytes 62–63 and 126–127 — because the PCU stores a set that fails them
@@ -224,14 +238,27 @@ success. A value the boiler already holds is not written at all, because EEPROM
 endurance is finite, and a queue where every edit is already satisfied sends no
 write frame.
 
-Twenty parameters are writable; the table is `PARAM_LIMITS` in
-[dietrich.cpp](components/dietrich/dietrich.cpp). Two of them need watching.
+Twenty-two parameters are writable; the table is `PARAM_LIMITS` in
+[dietrich.cpp](components/dietrich/dietrich.cpp). Two groups need watching.
+
 **p28 and p29** (pump CH min/max) are stored 2–10 and mean 20–100 %, which is how
-Recom and the manual number them — so you write `4` to get the `40 %` the
-`param_pump_ch_*` sensors then read back. It is the one place in this component
-where what you write is not what you read. **p73 and p105** sit in the image's
-upper half, so a write to either refreshes the CRC at bytes 126–127 rather than
-the one at 62–63 — a path no other writer has been observed taking.
+Recom and the manual number them. This component does not: the thing being set is
+a pump speed in per cent and the `param_pump_ch_*` sensors publish per cent, so
+the write path takes per cent too and divides on the way into the byte. Write
+`30` to get `30 %`, and the sensor reads back the `30` you wrote. Only whole tens
+exist — `45` is refused rather than rounded, because the stored byte cannot hold
+it. The one parameter where what you write is *not* what you read is **p61**,
+which is in tenths of a degree: type `-5` and `param_control_temp_offset` reads
+`-0.5 °C`. It was deliberately not rescaled the way p28/p29 were — the pump bytes
+only ever held ten values, so per cent in steps of 10 threw nothing away, whereas
+whole degrees here would turn 201 usable settings into 21.
+
+**p73, p85, p86, p88, p105 and p106** — six in all — sit in the image's upper
+half, so a write to any of them refreshes the CRC at bytes 126–127 rather than the
+one at 62–63. That the upper half is protected the same way is certain, since the
+stored CRC checks out on every dump, but no other writer has been observed
+maintaining it: Recom's parameter screens stop at p44 on this board and its EEPROM
+menu is greyed out.
 
 Five parameters — p27, p30, p61, p86 and p106 — are stored two's complement. The
 manual puts it as *“Setting value − 256 = Desired value”* and tabulates 226 = −30,
@@ -306,18 +333,19 @@ previously published raw:
 - `demand_source_bit4` (DHW eco)
 
 Both are now inverted, so those two sensors report the opposite of what earlier
-versions did. If you built automations or template
-sensors that compensated for the old behaviour, drop the compensation.
+versions did. 
 
 ### ESP32 notes
 
-The component works on ESP32 as well (verified with an ESP32 DevKit V4 /
-`az-delivery-devkit-v4`), but do **not** copy the ESP8266 UART/logger settings:
+The component works on ESP32 (verified with an ESP32 DevKit-C V4 /
+`variant: esp32`).
 
-- keep the `logger:` on its default UART0/USB console — `hardware_uart: UART1`
-  would map to GPIO9/GPIO10, which are wired to the internal SPI flash on classic
-  ESP32 modules and crash the board in a boot loop (this was the cause of issue #7),
-- put the boiler bus on free pins, e.g. UART2: `tx_pin: GPIO17`, `rx_pin: GPIO16`.
+Put the boiler bus on free pins — `tx_pin: GPIO18`, `rx_pin: GPIO19` is what this
+board runs. ESPHome routes whichever pins you name through the ESP32's UART
+matrix, so there is no need to pick a particular hardware UART or to stay on its
+nominal pins. **Avoid GPIO16 and GPIO17**: they are the obvious-looking choice,
+and they are wired to the PSRAM on WROVER modules, so a config that works on one
+DevKit will fail on another that looks identical.
 
 The component source lives in [components/dietrich](components/dietrich). Compared to the
 legacy custom component it also validates every response frame with CRC16
@@ -342,10 +370,10 @@ RXD 2  ---          |        TX
        +---------+
 ```
 
-I have connected ESP to prototype board with pins, on board there was simple voltage divider (1kΩ / 2kΩ) to change power from 5V to 3V, but on my board it was not needed and i have connected pins directly to Dietich MCR33, .
-Cable is simple phone cord, cut and added pin connector to it.
+I have connected ESP to prototype board with pins. 
+There is a simple voltage divider (1kΩ / 1.8kΩ) to change RX from 5V to 3V.
 
-Screenshot of board connected to boiler.
+Screenshots from original repo.
 
 ![Screenshot](board.jpg)
 
@@ -360,12 +388,11 @@ GPL-3.0 is used to ensure any derivative work remains open source.
 
 ## Protocol mapping
 
-[mapping/](mapping/) holds the Recom configuration files the decode is derived from -
-one XML per boiler and parameter set, `language.xml` for the string table, and
-`DeviceConfiguration.xml` for the boiler-code to protocol mapping. Only
-`PCU-05_P3.xml` is used by this component; the Avanta and MCR maps are kept
-alongside it because reading a field against its neighbours is often what settles
-what the field is.
+[mapping/](mapping/) holds the Recom configuration files the decode is derived from:
+`PCU-05_P3.xml` for this board, `language.xml` for the string table, and
+`DeviceConfiguration.xml` for the boiler-code to protocol mapping. `AvantaV1_P5.xml`
+is kept alongside them because reading a field against the same field in a
+neighbouring map is often what settles what the field is.
 `mapping/pcu05_p3_fieldmap.md` is the resolved, human-readable field map for the
 PCU-05 P3 and `mapping/pcu05_p3_datamap.json` the machine-readable form used to
 generate the code tables.
@@ -380,7 +407,7 @@ appliance's commissioned parameter image.
 
 ## Credits
 
-Thanks to great work from https://github.com/rjblake/remeha - for creating maping of data in excel file.
+Thanks to great work from https://github.com/rjblake/remeha 
 
 The rewrite of the original custom component into a native ESPHome external component
 (the C++ and Python code in [components/dietrich](components/dietrich), including CRC16
