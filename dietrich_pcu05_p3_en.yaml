@@ -407,6 +407,48 @@ button:
     on_press:
       - lambda: 'id(boiler).dump_eeprom(0x01, 0x00, 128);'
 
+  # --- the write UI's buttons; uncomment with the write section below ---------
+  #
+  # Stage whatever is in the two boxes. Touches RAM only, so it needs neither the
+  # write enable switch nor the bus - but the parameter and its range are checked
+  # here, which makes this where a typo gets caught. Queueing a parameter that is
+  # already staged replaces its value.
+  # - platform: template
+  #   name: "Boiler queue parameter"
+  #   entity_category: config
+  #   on_press:
+  #     - lambda: |-
+  #         id(boiler).queue_param(id(write_param_no), (int) id(write_value).state);
+
+  # Everything staged, in one transaction. Refused unless the write enable
+  # switch is on; the boiler is not required to be idle. The queue survives a
+  # refusal or a failure and is emptied only by a write that reads back
+  # verified, so a retry costs no retyping.
+  # - platform: template
+  #   name: "Boiler write queue to boiler"
+  #   entity_category: config
+  #   on_press:
+  #     - lambda: 'id(boiler).write_queue();'
+
+  # - platform: template
+  #   name: "Boiler clear write queue"
+  #   entity_category: config
+  #   on_press:
+  #     - lambda: 'id(boiler).clear_param_queue();'
+
+  # --- bring-up self-tests; see the section at the bottom of this file --------
+  # - platform: template
+  #   name: "Boiler service mode self-test"
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(boiler).test_service_mode();'
+
+  # - platform: template
+  #   name: "Boiler identity write block 0x16"
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(boiler).write_block_unchanged(0x16);'
+
 # ---------------------------------------------------------------------------
 # Writing parameters
 #
@@ -546,33 +588,10 @@ button:
 #     mode: box
 #     entity_category: config
 #
-# button:
-#   # Stage whatever is in the two boxes. Touches RAM only, so it needs neither the
-#   # write enable switch nor the bus - but the parameter and its range are checked
-#   # here, which makes this where a typo gets caught. Queueing a parameter that is
-#   # already staged replaces its value.
-#   - platform: template
-#     name: "Boiler queue parameter"
-#     entity_category: config
-#     on_press:
-#       - lambda: |-
-#           id(boiler).queue_param(id(write_param_no), (int) id(write_value).state);
-#
-#   # Everything staged, in one transaction. Refused unless the write enable
-#   # switch is on; the boiler is not required to be idle. The queue survives a
-#   # refusal or a failure and is emptied only by a write that reads back
-#   # verified, so a retry costs no retyping.
-#   - platform: template
-#     name: "Boiler write queue to boiler"
-#     entity_category: config
-#     on_press:
-#       - lambda: 'id(boiler).write_queue();'
-#
-#   - platform: template
-#     name: "Boiler clear write queue"
-#     entity_category: config
-#     on_press:
-#       - lambda: 'id(boiler).clear_param_queue();'
+# The three buttons that drive this live at the end of the `button:` block above,
+# commented out - uncomment them there. Keeping every button in that one block
+# is deliberate, because `button:` may appear only once in a YAML file; a second
+# one here would fail to load with `Duplicate key "button"`.
 
 # ---------------------------------------------------------------------------
 # Bring-up, for a board this component has not been used on before
@@ -594,15 +613,5 @@ button:
 #                             "verified" means the frame was accepted, NOT that
 #                             the board applied it. A frame-level check only.
 # ---------------------------------------------------------------------------
-# button:
-#   - platform: template
-#     name: "Boiler service mode self-test"
-#     entity_category: diagnostic
-#     on_press:
-#       - lambda: 'id(boiler).test_service_mode();'
-#
-#   - platform: template
-#     name: "Boiler identity write block 0x16"
-#     entity_category: diagnostic
-#     on_press:
-#       - lambda: 'id(boiler).write_block_unchanged(0x16);'
+# These two buttons also live at the end of the `button:` block above, commented
+# out, for the same reason.
