@@ -427,7 +427,6 @@ static void begin(const char *name) {
 
 static esphome::dietrich::Dietrich *make() {
   auto *d = new esphome::dietrich::Dietrich();
-  d->set_variant(esphome::dietrich::DIETRICH_VARIANT_PCU05_P3);
   d->set_allow_writes(true);
   return d;
 }
@@ -962,20 +961,11 @@ int main() {
 
   // -- 9. gates ---------------------------------------------------------------
   {
-    begin("allow_writes and variant gates");
+    begin("the allow_writes gate");
     auto *d = new Dietrich();
-    d->set_variant(DIETRICH_VARIANT_PCU05_P3);
     check(!d->write_param(33, 5), "refused with allow_writes off");
     check(logged("allow_writes is not set"), "refusal explains why");
     delete d;
-
-    g_log.clear();
-    auto *e = new Dietrich();
-    e->set_variant(DIETRICH_VARIANT_MCR3);
-    e->set_allow_writes(true);
-    check(!e->write_param(33, 5), "refused on a non-pcu05_p3 variant");
-    check(logged("only supported on variant pcu05_p3"), "refusal explains why");
-    delete e;
   }
 
   // -- 10. only one transaction at a time ------------------------------------
@@ -1075,19 +1065,6 @@ int main() {
     pump(*d, 200);
     check(g_boiler.idents == 4, "both addresses asked a second time");
     delete d;
-  }
-
-  // -- 13d. not on a variant whose layout this is not ------------------------
-  {
-    begin("identification is gated on the variant");
-    auto *e = new Dietrich();
-    e->set_variant(DIETRICH_VARIANT_MCR3);
-    check(!e->read_identification(), "refused on a non-pcu05_p3 variant");
-    check(logged("only supported on variant pcu05_p3"), "refusal explains why");
-    e->update();
-    pump(*e, 150);
-    check(g_boiler.idents == 0, "and never sent unasked either");
-    delete e;
   }
 
   // -- 14. EEPROM dump: a read-only sweep of the unmapped blocks -------------
@@ -1227,7 +1204,6 @@ int main() {
   {
     begin("board reset gates");
     auto *d = new Dietrich();
-    d->set_variant(DIETRICH_VARIANT_PCU05_P3);
     check(!d->reset_board(), "refused without allow_writes");
     check(logged("allow_writes is not set"), "refusal explains why");
     pump(*d);
@@ -1383,7 +1359,6 @@ int main() {
   {
     begin("raw frames are gated");
     auto *d = new Dietrich();
-    d->set_variant(DIETRICH_VARIANT_PCU05_P3);
     check(!d->send_raw("02 FE 01 05 08 08 0C AE CE 03"), "send_raw refused without allow_writes");
     check(!d->send_command(0x01, 0x09, 0x52, ""), "send_command refused too");
     check(!d->test_factory_mode(), "and so is the factory mode test");

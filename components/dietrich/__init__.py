@@ -16,8 +16,8 @@ from esphome.const import (
     UNIT_REVOLUTIONS_PER_MINUTE,
 )
 
-CODEOWNERS = ["@kakaki"]
-AUTHORS = ["@kakaki", "Claude Fable 5 (Anthropic)"]
+CODEOWNERS = ["@peetervalk"]
+AUTHORS = ["@kakaki", "@peetervalk", "Claude (Anthropic)"]
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["binary_sensor", "sensor", "text_sensor"]
 MULTI_CONF = False
@@ -25,15 +25,8 @@ MULTI_CONF = False
 dietrich_ns = cg.esphome_ns.namespace("dietrich")
 Dietrich = dietrich_ns.class_("Dietrich", cg.PollingComponent, uart.UARTDevice)
 
-CONF_VARIANT = "variant"
 CONF_ALLOW_WRITES = "allow_writes"
 CONF_USE_FACTORY_MODE = "use_factory_mode"
-DietrichVariant = dietrich_ns.enum("DietrichVariant")
-VARIANTS = {
-    "mcr3": DietrichVariant.DIETRICH_VARIANT_MCR3,
-    "calenta_v1_p5": DietrichVariant.DIETRICH_VARIANT_CALENTA_V1_P5,
-    "pcu05_p3": DietrichVariant.DIETRICH_VARIANT_PCU05_P3,
-}
 
 
 def _temp_schema():
@@ -297,15 +290,6 @@ TEXT_SENSOR_SCHEMAS = {
 }
 
 def _validate_writes(config):
-    # The 128 byte parameter map is specific to the PCU-05 P3 parameter set: the
-    # same byte offset is a different parameter on another board, so writing
-    # anywhere else would be writing blind.
-    if config[CONF_ALLOW_WRITES] and config[CONF_VARIANT] != "pcu05_p3":
-        raise cv.Invalid(
-            f"{CONF_ALLOW_WRITES} is only supported on variant pcu05_p3, "
-            f"not {config[CONF_VARIANT]} - the parameter map is specific to "
-            f"that parameter set"
-        )
     # Factory level is a way of writing, not a thing on its own: it only takes
     # effect inside a write transaction, so asking for it without allow_writes
     # is a config that silently does nothing.
@@ -321,7 +305,6 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(Dietrich),
-            cv.Optional(CONF_VARIANT, default="mcr3"): cv.enum(VARIANTS, lower=True),
             # Master gate for the write path. Off by default: without it the
             # component will not unlock service mode or touch EEPROM at all, and
             # every write method refuses and says so in the log. See
@@ -351,7 +334,6 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
-    cg.add(var.set_variant(config[CONF_VARIANT]))
     cg.add(var.set_allow_writes(config[CONF_ALLOW_WRITES]))
     cg.add(var.set_use_factory_mode(config[CONF_USE_FACTORY_MODE]))
 

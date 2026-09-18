@@ -8,3 +8,7 @@
 # built by tests/run.sh
 /tests/test_write
 /tests/test_write.exe
+
+# live site config, kept out of the repo - dietrich_pcu05_p3_en.yaml is the
+# example that carries anything worth sharing from it
+/katel.yaml

@@ -51,7 +51,7 @@ read-modify-write - and, more to the point, the refusals:
 - the write enable gate refuses a write without unlocking anything
 - writing a value the boiler already holds sends no write frame, because EEPROM
   endurance is finite
-- `allow_writes` and `variant: pcu05_p3` both gate the whole path
+- `allow_writes` gates the whole path
 - ordinary polling never unlocks service mode or writes anything
 - a boiler that is burning, purging or finishing a charge **is** written to, and
   the pre-flight sample inside the transaction records what it was doing rather

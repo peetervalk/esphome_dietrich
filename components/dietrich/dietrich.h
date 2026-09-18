@@ -14,12 +14,6 @@ struct CodeText;
 // one writable parameter and its documented range; the table lives in dietrich.cpp
 struct ParamLimit;
 
-enum DietrichVariant : uint8_t {
-  DIETRICH_VARIANT_MCR3 = 0,
-  DIETRICH_VARIANT_CALENTA_V1_P5,
-  DIETRICH_VARIANT_PCU05_P3,
-};
-
 // One request/response exchange with the boiler. The PARAM entries read the
 // 128 byte parameter block out of EEPROM blocks 0x14..0x1B, 16 bytes at a time;
 // see mapping/pcu05_p3_protocol.md. They must stay last and contiguous - the
@@ -161,12 +155,6 @@ struct PendingEdit {
 
 class Dietrich : public PollingComponent, public uart::UARTDevice {
  public:
-  void set_variant(DietrichVariant variant) {
-    this->variant_ = variant;
-    // IDENTIFICATION is decoded to the PCU-05 P3 layout, so only that variant
-    // asks for it; anything else must not send a request it cannot read back.
-    this->pending_ident_ = variant == DIETRICH_VARIANT_PCU05_P3;
-  }
   void set_allow_writes(bool allow) { this->allow_writes_ = allow; }
   // The UI gate, and only that: a switch in Home Assistant so a write cannot be
   // set off by a stray press or a misfiring automation. The real gate is
@@ -321,8 +309,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // Ask both device addresses who they think they are: device type, software
   // and parameter version, operating hours, connected device types and the last
   // blocking and locking codes. A plain read - no service mode, nothing written
-  // - so it is not gated behind allow_writes, only behind variant pcu05_p3. The
-  // result goes to the log.
+  // - so it is not gated behind allow_writes at all. The result goes to the log.
   //
   // Sent once on the first poll after boot, as Recom does when it connects. Call
   // this to ask again; the request goes out on the next poll interval.
@@ -343,8 +330,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // These are the whole write API, and they are meant to be called from a YAML
   // lambda. Each returns true when the request was *accepted*, not when it
   // completed: the exchange runs asynchronously in loop() and reports its result
-  // to the log. All of them refuse unless allow_writes is set on the component
-  // and the variant is pcu05_p3, and only one can be in flight at a time.
+  // to the log. All of them refuse unless allow_writes is set on the component,
+  // and only one can be in flight at a time.
 
   // Unlock service mode and immediately re-lock it, writing nothing at all.
   // Sample byte 63 reports the state - the P3 map calls that one rs232_mode, but
@@ -558,8 +545,6 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   static float temp_or_nan_(uint16_t raw);
   static std::string hex_str_(const uint8_t *data, size_t len);
 
-  DietrichVariant variant_{DIETRICH_VARIANT_MCR3};
-
   DietrichState state_machine_{DIETRICH_IDLE};
   // long enough for a full parameter write; see DIETRICH_QUEUE_LEN
   DietrichRequest queue_[DIETRICH_QUEUE_LEN]{};
@@ -646,9 +631,8 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // the boot service-mode check runs on the first long-enough sample only
   bool seen_sample_{false};
   // Recom issues IDENTIFICATION when it connects; this asks once at boot and
-  // whenever read_identification() sets it again. set_variant() decides whether
-  // it starts set at all - the default variant is mcr3, which never asks.
-  bool pending_ident_{false};
+  // whenever read_identification() sets it again.
+  bool pending_ident_{true};
 
   // --- EEPROM dump: read-only, and outside the transaction machinery entirely --
   bool dump_active_{false};

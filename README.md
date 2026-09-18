@@ -1,60 +1,62 @@
-# Dietrich (Remeha) Boiler connectivity using ESP8266 / ESP32 with ESPHOME
+# De Dietrich / Remeha PCU-05 P3 over ESPHome
 
-Native ESPHome **external component** for reading data from De Dietrich (or Remeha) PC interface, tested with model mcr3.
-Works on both **ESP8266** (e.g. Wemos D1) and **ESP32** (e.g. DevKit V4) boards with ESPHOME software - sample YAML files are in English and Polish.
+Native ESPHome **external component** for a De Dietrich (or Remeha) boiler with a
+**PCU-05 control board running parameter set P3**, over the board's PC/service
+interface. It reads the full sample block and the stored parameter set, and it can
+write parameters back. Works on **ESP32** (e.g. DevKit V4) and **ESP8266** (e.g.
+Wemos D1).
+
+> **Scope.** This started as a fork of
+> [kakaki/esphome_dietrich](https://github.com/kakaki/esphome_dietrich), which
+> supports the **MCR3** and **Calenta / MCX Plus / Avanta V1_P5** boards. Those
+> variants have been removed here: everything below the sample decode — the
+> parameter image, its CRCs, the service-mode unlock and the whole write path — is
+> specific to the PCU-05 P3 parameter set, and keeping variants nobody could test
+> meant shipping code that was only plausibly correct. **If your board is an MCR3
+> or an Avanta/Calenta, use
+> [kakaki/esphome_dietrich](https://github.com/kakaki/esphome_dietrich) instead.**
 
 ## Usage
 
 Since ESPHome 2025.2 the old `platform: custom` + `includes:` mechanism is removed, so this
-project is now a proper external component. Add it to your YAML:
+project is a proper external component. Add it to your YAML:
 
 ```yaml
 external_components:
-  - source: github://kakaki/esphome_dietrich
+  - source: github://peetervalk/esphome_dietrich
     components: [ dietrich ]
 
 uart:
   id: uart_bus
   baud_rate: 9600
-  tx_pin: GPIO1
-  rx_pin: GPIO3
+  tx_pin: GPIO17
+  rx_pin: GPIO16
 
 dietrich:
   uart_id: uart_bus
   update_interval: 15s
-  # variant: calenta_v1_p5   # Calenta / MCX Plus / Avanta V1_P5
-  # variant: pcu05_p3        # PCU-05 control board, parameter set P3
   flow_temp:
     name: "Boiler flow temp"
   state_text:
     name: "Boiler state"     # decoded status text, no lambda needed
-  # ... see the example YAML files for the full sensor list
+  # ... see the example YAML for the full sensor list
 ```
 
-Full examples:
+Full example: **[dietrich_pcu05_p3_en.yaml](dietrich_pcu05_p3_en.yaml)** (ESP32,
+English) — every sensor the component exposes, the stored-parameter block, the
+read-only diagnostics and the complete write UI, all commented.
 
-| File | Board | Language | Protocol variant |
-|---|---|---|---|
-| [dietrich_en.yaml](dietrich_en.yaml) | ESP8266 | English | `mcr3` (default) |
-| [dietrich_pl.yaml](dietrich_pl.yaml) | ESP8266 | Polish | `mcr3` (default) |
-| [dietrich_calenta_v1_p5_en.yaml](dietrich_calenta_v1_p5_en.yaml) | ESP8266 | English | `calenta_v1_p5` |
-| [dietrich_calenta_v1_p5_pl.yaml](dietrich_calenta_v1_p5_pl.yaml) | ESP8266 | Polish | `calenta_v1_p5` |
-| [dietrich_esp32_en.yaml](dietrich_esp32_en.yaml) | ESP32 | English | `mcr3` (default) |
-| [dietrich_pcu05_p3_en.yaml](dietrich_pcu05_p3_en.yaml) | ESP32 | English | `pcu05_p3` |
+### Protocol
 
-### Protocol variants
+The PCU-05 speaks the Remeha protocol (`protocol.nr` 1 in Recom's
+`DeviceConfiguration.xml`): CRC16, 7-byte request and response header. Recom groups
+other boards into other wire protocols — the Avanta protocol (`protocol.nr` 2, XOR
+checksum, 6-byte header) is the other common one — and this component no longer
+implements any of them.
 
-Recom's own `DeviceConfiguration.xml` groups these boards into several wire
-protocols. This component implements two of them, across three variants:
+### Identification
 
-| Variant | Protocol | Frame | Boards |
-|---|---|---|---|
-| `mcr3` (default) | Remeha (`protocol.nr` 1) | CRC16, 7-byte response header | MCR3, PCU-0x |
-| `pcu05_p3` | Remeha (`protocol.nr` 1) | same frames as `mcr3` | PCU-05, parameter set P3 |
-
-### Identification (`pcu05_p3` only)
-
-On `variant: pcu05_p3` the component asks both device addresses who they think they
+The component asks both device addresses who they think they
 are, on the first poll after boot, the way Recom opens a connection. It is a plain
 read — no service mode, nothing written — so it is not gated behind `allow_writes`
 and needs no configuration. The answer goes to the log:
@@ -126,7 +128,6 @@ stays off unless you ask for it:
 ```yaml
 dietrich:
   id: boiler
-  variant: pcu05_p3
   allow_writes: true
 ```
 
@@ -258,25 +259,26 @@ both. An ACK is still not proof a value changed, which
 is why every write is read back and compared; see
 [mapping/pcu05_p3_protocol.md](mapping/pcu05_p3_protocol.md) for what is known
 and what is still being pinned down.
-| `calenta_v1_p5` | Avanta (`protocol.nr` 2) | XOR checksum, 6-byte header | Calenta, MCX Plus, Avanta V1_P5 |
 
-`pcu05_p3` sends the same requests as `mcr3` - the PCU-05 sample block is a
-superset of every Avanta/Calenta map at identical byte offsets. What the variant
-changes is the decode:
+### Fields specific to the PCU-05 P3 map
 
-- adds the fields only the PCU-05 P3 map defines: `fan_speed_rpm` (the real rpm
+The PCU-05 sample block is a superset of the older Remeha and Avanta maps at
+identical byte offsets, and this component decodes it to the P3 map throughout:
+
+- the fields only the PCU-05 P3 map defines — `fan_speed_rpm` (the real rpm
   reading at data offset 44, distinct from the airflow pair that
   `fan_speed`/`fan_speed_setpoint` expose), `su_state`, `su_locking`,
   `su_blocking`, `ch_timer_enable`, `dhw_timer_enable`, `solar_temp`,
   `hmi_active`, `ch_setpoint_hmi`, `dhw_setpoint_hmi`, `service_mode` and
   `rs232_mode`,
-- inverts `input_bit0` (shutdown input) and `input_bit1` (release input), which
-  the PCU-05 P3 map marks `invert="true"` while the Avanta maps do not,
-- leaves `hydro_pressure` available but almost certainly dead. The PCU-05 P3 map
-  has no analog pressure field (Recom ships it commented out) and no
-  pressure-sensor parameter to enable one. This board reads water pressure as a
-  switch, which surfaces as `Min. water pressure(Blocking 14)` on
-  `blocking_text` - watch that rather than a bar reading.
+- `input_bit0` (shutdown input) and `input_bit1` (release input) are inverted,
+  which the PCU-05 P3 map marks `invert="true"` while the older Avanta maps do
+  not,
+- `hydro_pressure` is available but almost certainly dead. The PCU-05 P3 map has
+  no analog pressure field (Recom ships it commented out) and no pressure-sensor
+  parameter to enable one. This board reads water pressure as a switch, which
+  surfaces as `Min. water pressure(Blocking 14)` on `blocking_text` — watch that
+  rather than a bar reading.
 
 ### Status text sensors
 
@@ -297,14 +299,14 @@ The code tables are generated from `mapping/pcu05_p3_datamap.json`.
 
 ### Bit inversion fix
 
-Every Recom map - Avanta and PCU-05 alike - marks two sample bits
-`invert="true"`, which this component previously published raw:
+Every Recom map marks two sample bits `invert="true"`, which this component
+previously published raw:
 
 - `valve_bit0` (gas valve)
 - `demand_source_bit4` (DHW eco)
 
-Both are now inverted for **all** variants, so those two sensors report the
-opposite of what earlier versions did. If you built automations or template
+Both are now inverted, so those two sensors report the opposite of what earlier
+versions did. If you built automations or template
 sensors that compensated for the old behaviour, drop the compensation.
 
 ### ESP32 notes
@@ -318,15 +320,12 @@ The component works on ESP32 as well (verified with an ESP32 DevKit V4 /
 - put the boiler bus on free pins, e.g. UART2: `tx_pin: GPIO17`, `rx_pin: GPIO16`.
 
 The component source lives in [components/dietrich](components/dietrich). Compared to the
-legacy custom component it also validates every response frame with CRC16 (Remeha variants)
+legacy custom component it also validates every response frame with CRC16
 before publishing any values.
 
 Reads are non-blocking: the request/response exchange runs as a small state machine in
 `loop()` rather than with `delay()` calls, so the main loop is never stalled waiting on the
 bus and every configured sensor is published on every poll.
-
-The legacy header files `dietrich.h` and `dietrich_calentaV1_P5.h` are kept for users of
-ESPHome ≤ 2025.1 with the old `platform: custom` mechanism.
 
 ## Hardware
 
@@ -363,7 +362,10 @@ GPL-3.0 is used to ensure any derivative work remains open source.
 
 [mapping/](mapping/) holds the Recom configuration files the decode is derived from -
 one XML per boiler and parameter set, `language.xml` for the string table, and
-`DeviceConfiguration.xml` for the boiler-code to protocol mapping.
+`DeviceConfiguration.xml` for the boiler-code to protocol mapping. Only
+`PCU-05_P3.xml` is used by this component; the Avanta and MCR maps are kept
+alongside it because reading a field against its neighbours is often what settles
+what the field is.
 `mapping/pcu05_p3_fieldmap.md` is the resolved, human-readable field map for the
 PCU-05 P3 and `mapping/pcu05_p3_datamap.json` the machine-readable form used to
 generate the code tables.
@@ -382,5 +384,6 @@ Thanks to great work from https://github.com/rjblake/remeha - for creating mapin
 
 The rewrite of the original custom component into a native ESPHome external component
 (the C++ and Python code in [components/dietrich](components/dietrich), including CRC16
-frame validation and the `calenta_v1_p5` variant support) was done with the help of
-Claude (Anthropic), based on the original protocol logic in this repository.
+frame validation), and the subsequent PCU-05 P3 work — the parameter map, the EEPROM
+transactions and the write path — were done with the help of Claude (Anthropic), based on
+the original protocol logic in this repository and on Recom's own data maps.

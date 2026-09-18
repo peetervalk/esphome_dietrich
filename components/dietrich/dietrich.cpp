@@ -15,8 +15,8 @@ static const char *const TAG = "dietrich";
 // begin_write_phase_() and finish_txn_() both name the queue in their verdicts.
 static void format_edits_(const PendingEdit *edits, uint8_t len, char *buf, size_t size);
 
-// Remeha protocol (protocol.nr 1 in Recom's DeviceConfiguration.xml), used by
-// both the MCR3 and the PCU-05:
+// Remeha protocol (protocol.nr 1 in Recom's DeviceConfiguration.xml), as the
+// PCU-05 P3 speaks it:
 //
 //   02 | SRC | DEST | TYPE | LEN | COMMAND | EXTCMD | data.. | CRC-lo CRC-hi | 03
 //
@@ -32,9 +32,9 @@ static void format_edits_(const PendingEdit *edits, uint8_t len, char *buf, size
 // See mapping/pcu05_p3_protocol.md for the full command set, recovered from
 // Recom's own RemehaMessageFactory/RemehaReceiver and checked byte-for-byte
 // against a live PCU-05 P3 response.
-static const uint8_t CMD_SAMPLE_MCR3[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x02, 0x01, 0x69, 0xAB, 0x03};
-static const uint8_t CMD_COUNTER1_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1C, 0x98, 0xC2, 0x03};
-static const uint8_t CMD_COUNTER2_MCR3[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1D, 0x59, 0x02, 0x03};
+static const uint8_t CMD_SAMPLE_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x02, 0x01, 0x69, 0xAB, 0x03};
+static const uint8_t CMD_COUNTER1_REMEHA[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1C, 0x98, 0xC2, 0x03};
+static const uint8_t CMD_COUNTER2_REMEHA[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x10, 0x1D, 0x59, 0x02, 0x03};
 
 // Parameter block reads: COMMAND 0x10 (READ_EPROM_BLOCK) with the EEPROM block
 // index in the EXTCMD byte. Blocks 0x14..0x1B are the 128 byte parameter block,
@@ -124,11 +124,6 @@ static const uint8_t CMD_RESET_REMEHA[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x31,
 static const uint8_t CMD_IDENT_REMEHA_PCU[10] = {0x02, 0xFE, 0x01, 0x05, 0x08, 0x01, 0x0B, 0xE9, 0x5C, 0x03};
 static const uint8_t CMD_IDENT_REMEHA_PSU[10] = {0x02, 0xFE, 0x00, 0x05, 0x08, 0x01, 0x0B, 0xD4, 0x9C, 0x03};
 
-// Avanta protocol (protocol.nr 2), XOR checksum, 6 byte response header
-static const uint8_t CMD_SAMPLE_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x02, 0x00, 0x53, 0x03};
-static const uint8_t CMD_COUNTER1_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x01, 0x40, 0x03};
-static const uint8_t CMD_COUNTER2_CALENTA[8] = {0x02, 0x52, 0x05, 0x06, 0x10, 0x02, 0x43, 0x03};
-
 // byte 3 of a Remeha frame: 0x05 in a request, 0x06 in a response
 static const uint8_t REMEHA_TYPE_RESPONSE = 0x06;
 // and 0x15 when the board understood the frame and is refusing it. Recom only
@@ -138,6 +133,10 @@ static const uint8_t REMEHA_TYPE_RESPONSE = 0x06;
 static const uint8_t REMEHA_TYPE_NAK = 0x15;
 // STX + 6 header bytes + CRC16 + ETX
 static const size_t REMEHA_MIN_FRAME = 10;
+// STX | SRC | DEST | TYPE | LEN | COMMAND | EXTCMD, before the data block
+static const size_t REMEHA_HEADER_LEN = 7;
+// CRC-lo | CRC-hi | ETX, after it
+static const size_t REMEHA_TRAILER_LEN = 3;
 
 // give up on a response after this long
 static const uint32_t RESPONSE_TIMEOUT_MS = 600;
@@ -484,15 +483,7 @@ bool Dietrich::is_valid_crc_(const uint8_t *response, size_t n) {
 // read-modify-written back to EEPROM, crediting them to the wrong block would
 // rewrite sixteen unrelated parameters.
 //
-// Avanta (calenta_v1_p5) frames use an XOR checksum and a different header, so
-// that variant keeps its own much weaker check.
 const char *Dietrich::response_error_() const {
-  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5) {
-    if (this->rx_len_ < 3 || this->rx_buf_[0] != 2 || this->rx_buf_[1] != 65 || this->rx_buf_[2] != 6)
-      return "bad header";
-    return nullptr;
-  }
-
   const uint8_t *req = nullptr;
   size_t req_len = 0;
   this->command_for_(this->queue_[this->queue_pos_], &req, &req_len);
@@ -520,9 +511,9 @@ const char *Dietrich::response_error_() const {
   return nullptr;
 }
 
-size_t Dietrich::header_len_() const { return this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5 ? 6 : 7; }
+size_t Dietrich::header_len_() const { return REMEHA_HEADER_LEN; }
 
-size_t Dietrich::trailer_len_() const { return this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5 ? 2 : 3; }
+size_t Dietrich::trailer_len_() const { return REMEHA_TRAILER_LEN; }
 
 bool Dietrich::have_(size_t off, size_t count) const { return this->data_len_ >= off + count; }
 
@@ -621,7 +612,6 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
     return;
   }
 
-  const bool calenta = this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5;
   switch (req) {
     case DIETRICH_REQ_SERVICE_ON:
       *cmd = CMD_SERVICE_ON_REMEHA;
@@ -679,28 +669,22 @@ void Dietrich::command_for_(DietrichRequest req, const uint8_t **cmd, size_t *le
       *len = DIETRICH_READ_FRAME_LEN;
       break;
     case DIETRICH_REQ_COUNTER1:
-      *cmd = calenta ? CMD_COUNTER1_CALENTA : CMD_COUNTER1_MCR3;
-      *len = calenta ? sizeof(CMD_COUNTER1_CALENTA) : sizeof(CMD_COUNTER1_MCR3);
+      *cmd = CMD_COUNTER1_REMEHA;
+      *len = sizeof(CMD_COUNTER1_REMEHA);
       break;
     case DIETRICH_REQ_COUNTER2:
-      *cmd = calenta ? CMD_COUNTER2_CALENTA : CMD_COUNTER2_MCR3;
-      *len = calenta ? sizeof(CMD_COUNTER2_CALENTA) : sizeof(CMD_COUNTER2_MCR3);
+      *cmd = CMD_COUNTER2_REMEHA;
+      *len = sizeof(CMD_COUNTER2_REMEHA);
       break;
     case DIETRICH_REQ_SAMPLE:
     default:
-      *cmd = calenta ? CMD_SAMPLE_CALENTA : CMD_SAMPLE_MCR3;
-      *len = calenta ? sizeof(CMD_SAMPLE_CALENTA) : sizeof(CMD_SAMPLE_MCR3);
+      *cmd = CMD_SAMPLE_REMEHA;
+      *len = sizeof(CMD_SAMPLE_REMEHA);
       break;
   }
 }
 
 void Dietrich::decode_sample_() {
-  const bool p3 = this->variant_ == DIETRICH_VARIANT_PCU05_P3;
-  // The four fields below used to be addressed by absolute frame index. On the
-  // Avanta variant that lands one byte further into the data block than it does
-  // on the Remeha variants; keep that behaviour so existing configs are stable.
-  const size_t t = this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5 ? 1 : 0;
-
   this->pub_temp_(this->flow_temp_sensor_, 0);
   this->pub_temp_(this->return_temp_sensor_, 2);
   this->pub_temp_(this->dhw_in_temp_sensor_, 4);
@@ -731,9 +715,9 @@ void Dietrich::decode_sample_() {
   this->pub_bit_(this->demand_source_bit6_binary_sensor_, 36, 6, false);
   this->pub_bit_(this->demand_source_bit7_binary_sensor_, 36, 7, false);
 
-  // byte 37 - inputs; PCU-05 P3 inverts the shutdown and release inputs
-  this->pub_bit_(this->input_bit0_binary_sensor_, 37, 0, p3);
-  this->pub_bit_(this->input_bit1_binary_sensor_, 37, 1, p3);
+  // byte 37 - inputs; the PCU-05 P3 inverts the shutdown and release inputs
+  this->pub_bit_(this->input_bit0_binary_sensor_, 37, 0, true);
+  this->pub_bit_(this->input_bit1_binary_sensor_, 37, 1, true);
   this->pub_bit_(this->input_bit2_binary_sensor_, 37, 2, false);
   this->pub_bit_(this->input_bit3_binary_sensor_, 37, 3, false);
   this->pub_bit_(this->input_bit5_binary_sensor_, 37, 5, false);
@@ -790,12 +774,12 @@ void Dietrich::decode_sample_() {
   this->pub_u8_(this->su_blocking_sensor_, 48, 1.0f);
 
   // Not defined in the PCU-05 P3 map (Recom ships it commented out) - see README
-  this->pub_u8_(this->hydro_pressure_sensor_, 49 + t, 0.1f);
-  this->pub_bit_(this->hru_binary_sensor_, 50 + t, 1, false);
-  this->pub_bit_(this->ch_timer_enable_binary_sensor_, 50 + t, 6, false);
-  this->pub_bit_(this->dhw_timer_enable_binary_sensor_, 50 + t, 7, false);
-  this->pub_temp_(this->control_temp_sensor_, 51 + t);
-  this->pub_s16_(this->dhw_flowrate_sensor_, 53 + t, 0.01f);
+  this->pub_u8_(this->hydro_pressure_sensor_, 49, 0.1f);
+  this->pub_bit_(this->hru_binary_sensor_, 50, 1, false);
+  this->pub_bit_(this->ch_timer_enable_binary_sensor_, 50, 6, false);
+  this->pub_bit_(this->dhw_timer_enable_binary_sensor_, 50, 7, false);
+  this->pub_temp_(this->control_temp_sensor_, 51);
+  this->pub_s16_(this->dhw_flowrate_sensor_, 53, 0.01f);
 
   this->pub_temp_(this->solar_temp_sensor_, 56);
   this->pub_u16_(this->hmi_active_sensor_, 58);
@@ -873,16 +857,6 @@ void Dietrich::decode_sample_() {
 }
 
 void Dietrich::decode_counter1_() {
-  // The Avanta variant returns the first counter block six bytes further in
-  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5) {
-    this->pub_counter_(this->hours_run_pump_sensor_, 6, 2.0f);
-    this->pub_counter_(this->hours_run_3way_sensor_, 8, 2.0f);
-    this->pub_counter_(this->hours_run_ch_sensor_, 10, 2.0f);
-    this->pub_counter_(this->hours_run_dhw_sensor_, 12, 1.0f);
-    this->pub_counter_(this->power_supply_aval_hours_sensor_, 14, 2.0f);
-    return;
-  }
-
   this->pub_counter_(this->hours_run_pump_sensor_, 0, 2.0f);
   this->pub_counter_(this->hours_run_3way_sensor_, 2, 2.0f);
   this->pub_counter_(this->hours_run_ch_sensor_, 4, 2.0f);
@@ -894,16 +868,6 @@ void Dietrich::decode_counter1_() {
 }
 
 void Dietrich::decode_counter2_() {
-  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5) {
-    this->pub_counter_(this->pump_starts_sensor_, 0, 8.0f);
-    this->pub_counter_(this->number_of_3way_valve_cycles_sensor_, 2, 8.0f);
-    this->pub_counter_(this->burner_start_dhw_sensor_, 4, 8.0f);
-    this->pub_counter_(this->total_burner_start_sensor_, 6, 8.0f);
-    this->pub_counter_(this->failed_burner_start_sensor_, 8, 1.0f);
-    this->pub_counter_(this->number_flame_loss_sensor_, 10, 1.0f);
-    return;
-  }
-
   this->pub_counter_(this->total_burner_start_sensor_, 0, 8.0f);
   this->pub_counter_(this->failed_burner_start_sensor_, 2, 1.0f);
   this->pub_counter_(this->number_flame_loss_sensor_, 4, 1.0f);
@@ -1298,13 +1262,6 @@ bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_co
     this->set_result_(1, "%s refused: allow_writes is not set on the dietrich component", what);
     return false;
   }
-  // The 128 byte parameter map belongs to the PCU-05 P3 parameter set. On another
-  // board the same offset is a different parameter, so refuse outright rather
-  // than write something unknown.
-  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
-    this->set_result_(1, "%s refused: writing is only supported on variant pcu05_p3", what);
-    return false;
-  }
   if ((txn == DIETRICH_TXN_PARAM || txn == DIETRICH_TXN_IDENTITY) && !this->write_enabled_) {
     this->set_result_(1, "%s refused: the write enable switch is off", what);
     return false;
@@ -1322,10 +1279,6 @@ bool Dietrich::stage_txn_(DietrichTxn txn, uint8_t first_block, uint8_t block_co
 }
 
 bool Dietrich::dump_eeprom(uint8_t addr, uint8_t first, uint8_t count) {
-  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
-    ESP_LOGW(TAG, "eeprom dump is only supported on variant pcu05_p3");
-    return false;
-  }
   if (addr != 0x00 && addr != 0x01) {
     ESP_LOGW(TAG, "eeprom dump: 0x%02X is not a device address, use 0x00 or 0x01",
              static_cast<unsigned>(addr));
@@ -1352,10 +1305,6 @@ bool Dietrich::dump_eeprom(uint8_t addr, uint8_t first, uint8_t count) {
 }
 
 bool Dietrich::read_identification() {
-  if (this->variant_ != DIETRICH_VARIANT_PCU05_P3) {
-    ESP_LOGW(TAG, "identification is only supported on variant pcu05_p3");
-    return false;
-  }
   // Read-only, so unlike the write API this is not gated behind allow_writes and
   // does not need the bus to itself - it just takes the next poll interval.
   this->pending_ident_ = true;
@@ -2361,8 +2310,7 @@ void Dietrich::update() {
     this->queue_len_ = 2;
     // A parameter sweep is 8 requests, so give it a whole poll interval of its own
     // rather than appending it to the sample or counter cycle.
-  } else if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->want_params_() &&
-      this->param_timer_ >= PARAM_REFRESH_CYCLES) {
+  } else if (this->want_params_() && this->param_timer_ >= PARAM_REFRESH_CYCLES) {
     this->param_timer_ = 0;
     this->param_blocks_seen_ = 0;
     for (uint8_t i = 0; i < DIETRICH_PARAM_BLOCKS; i++)
@@ -2383,17 +2331,10 @@ void Dietrich::update() {
 }
 
 void Dietrich::dump_config() {
-  const char *variant = "mcr3";
-  if (this->variant_ == DIETRICH_VARIANT_CALENTA_V1_P5)
-    variant = "calenta_v1_p5";
-  else if (this->variant_ == DIETRICH_VARIANT_PCU05_P3)
-    variant = "pcu05_p3";
-
-  ESP_LOGCONFIG(TAG, "Dietrich boiler:");
-  ESP_LOGCONFIG(TAG, "  Variant: %s", variant);
+  ESP_LOGCONFIG(TAG, "Dietrich boiler (PCU-05 P3):");
   ESP_LOGCONFIG(TAG, "  Writing: %s", this->allow_writes_ ? "enabled" : "disabled");
   ESP_LOGCONFIG(TAG, "  Write enable (UI gate): %s", this->write_enabled_ ? "on" : "off");
-  if (this->variant_ == DIETRICH_VARIANT_PCU05_P3 && this->hydro_pressure_sensor_ != nullptr) {
+  if (this->hydro_pressure_sensor_ != nullptr) {
     ESP_LOGW(TAG, "  hydro_pressure is not part of the PCU-05 P3 map - verify it against the boiler display");
   }
   LOG_UPDATE_INTERVAL(this);

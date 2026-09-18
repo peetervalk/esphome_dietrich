@@ -1,9 +1,9 @@
 --- # De Dietrich / Remeha boiler with a PCU-05 control board, parameter set P3
 #
 # The PCU-05 speaks the Remeha protocol (protocol.nr 1 in Recom's
-# DeviceConfiguration.xml), the same one the mcr3 variant uses. Its sample block
-# is a superset of the Avanta/Calenta maps, so `variant: pcu05_p3` adds the
-# extra fields and applies the bit inversions Recom defines for this board.
+# DeviceConfiguration.xml): 7 byte header, CRC16, and the sample block this
+# component decodes. This component targets that board and that parameter set
+# only - see the README if yours is an MCR3 or an Avanta/Calenta.
 #
 # Board here is an ESP32 DevKit V4; for a Wemos D1 (ESP8266) swap the `esp32:`
 # block for:
@@ -35,7 +35,7 @@ ota:
   platform: esphome
 
 external_components:
-  - source: github://kakaki/esphome_dietrich
+  - source: github://peetervalk/esphome_dietrich
     components: [ dietrich ]
   # or locally, when this YAML lives inside a clone of the repository:
   # - source: components
@@ -52,7 +52,6 @@ dietrich:
   id: boiler
   uart_id: uart_bus
   update_interval: 15s
-  variant: pcu05_p3
 
   # Writing to the boiler's EEPROM is off by default and has to be turned on
   # deliberately. With it off, every write method refuses and says so in the
@@ -96,6 +95,10 @@ dietrich:
     name: "Boiler DHW in temp"
   outside_temp:
     name: "Boiler outside temp"
+  # Recom calls byte 8 "Calorifier temp." - a calorifier IS the hot water
+  # cylinder, so on a solo boiler feeding a tank this is the DHW tank sensor.
+  # Worth renaming to something with "DHW" or "tank" in it, or searching Home
+  # Assistant will never surface it. Not to be confused with dhw_in_temp above.
   calorifier_temp:
     name: "Boiler calorifier temp"
   boiler_control_temp:
@@ -114,6 +117,13 @@ dietrich:
     name: "Boiler setpoint DHW"
   room_temp_setpoint:
     name: "Boiler setpoint room"
+  # Byte 27, the boiler's LIVE target flow temp, and the single most useful
+  # sensor here. Confirmed across a CH burn and a DHW charge on a PCU-05 P3:
+  #   no demand at all -> 7.0 C   (frost-protection idle, not a fault)
+  #   CH demand        -> tracks ch_setpoint
+  #   DHW charge       -> climbs to p2 + p32, well above the tank setpoint
+  #   at every ignition it spikes to 90.0 C for one poll
+  # So it is emphatically not a copy of ch_setpoint.
   internal_setpoint:
     name: "Boiler internal setpoint"
   ch_setpoint_hmi:
@@ -121,8 +131,16 @@ dietrich:
   dhw_setpoint_hmi:
     name: "Boiler setpoint DHW (HMI)"
 
-  # Fan / airflow. fan_speed_setpoint and fan_speed are the airflow pair at data
-  # offsets 22/24; fan_speed_rpm is the dedicated rpm field at offset 44.
+  # Fan / airflow. Three genuinely different quantities, per Recom's map:
+  #   byte 22/24 "Airflow set" / "Airflow" - no unit given in the map
+  #   byte 44    "Fan speed"               - explicitly Rpm
+  # A full DHW charge (min fire -> 100%) on a PCU-05 P3 pinned the relationship:
+  #   fan_speed = 1.0415 x airflow + 642        (fits every sample to ~1 rpm)
+  #   min fire  airflow 1182 / fan 1873 rpm
+  #   max fire  airflow 4702 / fan 5539 rpm
+  # The 642 rpm intercept is almost certainly Recom's "RPM at 0KW" parameter,
+  # which makes airflow the power-proportional variable and byte 44 the raw
+  # tacho. Multiply airflow by (boiler max kW / airflow at max fire) to get kW.
   fan_speed_setpoint:
     name: "Boiler airflow setpoint"
   fan_speed:
@@ -137,6 +155,12 @@ dietrich:
     name: "Boiler available power"
   desired_max_power:
     name: "Boiler desired max power"
+  # Byte 33 "Actual power" - modulation position within the fan range, not kW
+  # and not a fraction of max power:
+  #   actual_power = (fan_speed - fan at min fire) / (fan at max - at min) x 100
+  # which reproduced every logged sample on a PCU-05 P3 to within 1%. That is
+  # why CH cycles at minimum fire correctly read 0-1%: the boiler really is at
+  # the bottom of its range there, and nothing is wrong with the decode.
   actual_power:
     name: "Boiler actual power"
   pump_percentage:
@@ -144,10 +168,11 @@ dietrich:
   dhw_flowrate:
     name: "Boiler DHW flow rate"
 
-  # The PCU-05 P3 reads water pressure as a switch, not a transducer: its map has
-  # no analog pressure field and no pressure-sensor parameter. Low pressure shows
-  # up as "Min. water pressure(Blocking 14)" on blocking_text instead. Enable this
-  # only if your board turns out to report something that tracks the gauge.
+  # The PCU-05 P3 reads water pressure as a switch, not a transducer: Recom's own
+  # map has the byte-49 pressure field commented out, and there is no
+  # pressure-sensor parameter. Low pressure shows up as "Min. water
+  # pressure(Blocking 14)" on blocking_text instead. Enable this only if your
+  # board turns out to report something that tracks the gauge.
   # hydro_pressure:
   #   name: "Boiler water pressure"
 
@@ -255,6 +280,72 @@ dietrich:
   number_flame_loss:
     name: "Boiler flame loss count"
 
+  # ----------------------------------------------------- stored parameters --
+  # Read from EEPROM blocks 0x14..0x1B, not from the sample block: these are the
+  # boiler's stored configuration rather than what it is doing right now.
+  # Reading them needs no service-mode unlock and no `allow_writes` - it is an
+  # ordinary block read. Configuring any of them makes the component spend one
+  # poll interval on an 8 request sweep at boot and again roughly every hour, so
+  # an edit made at the boiler's own service menu shows up without a reboot.
+  #
+  # Uncomment the ones you care about; the sweep costs the same either way.
+  #
+  # p1/p25/p26/p27 are the heating curve, which on this board is a straight line
+  # through two points rather than a curve:
+  #   flow = p26 + (p1 - p26) x (p25 - T_outside) / (p25 - p27)
+  # Factory is (-15 -> 80) .. (20 -> 20).
+  # param_ch_max_flow:
+  #   name: "P1 max CH flow temp"
+  #   entity_category: diagnostic
+  # param_curve_foot_outside:
+  #   name: "P25 curve footpoint outside"
+  #   entity_category: diagnostic
+  # param_curve_foot_flow:
+  #   name: "P26 curve footpoint flow"
+  #   entity_category: diagnostic
+  # param_curve_cold_outside:
+  #   name: "P27 curve cold-end outside"
+  #   entity_category: diagnostic
+  # Factory 90; caps whatever the curve asks for.
+  # param_max_flow_system:
+  #   name: "P23 max system flow temp"
+  #   entity_category: diagnostic
+  #
+  # The DHW tank set. p33 decides when a charge starts, p105 how far past the
+  # setpoint it runs before stopping, and p32 how far above the tank setpoint
+  # the boiler drives the flow while charging - which is what makes
+  # internal_setpoint climb well above p2 during a charge (p2 + p32, exactly).
+  # param_dhw_setpoint:
+  #   name: "P2 DHW setpoint"
+  #   entity_category: diagnostic
+  # param_dhw_hysteresis:
+  #   name: "P33 DHW hysteresis"
+  #   entity_category: diagnostic
+  # param_dhw_setpoint_raise:
+  #   name: "P32 DHW setpoint raise"
+  #   entity_category: diagnostic
+  # param_calorifier_offset:
+  #   name: "P105 DHW tank offset"
+  #   entity_category: diagnostic
+  # param_ch_hysteresis:
+  #   name: "P73 CH hysteresis"
+  #   entity_category: diagnostic
+  #
+  # Factory 2 min; 99 means the pump runs continuously.
+  # param_pump_post_run:
+  #   name: "P5 pump post-run"
+  #   entity_category: diagnostic
+  # p28/p29 are stored as 2..10 and published as per cent, so factory 3 reads
+  # back as 30 %. The write path takes per cent too - you type the 40 the sensor
+  # will read back, not the 4 Recom numbers it. Only whole tens exist: 45 is
+  # refused rather than rounded, because the stored byte cannot hold it.
+  # param_pump_ch_min:
+  #   name: "P28 pump CH min"
+  #   entity_category: diagnostic
+  # param_pump_ch_max:
+  #   name: "P29 pump CH max"
+  #   entity_category: diagnostic
+
   # Where the write path answers - uncomment along with `allow_writes` and the
   # write section at the bottom. write_result carries the verdict of whatever
   # the write path last did (refusals, progress and success alike) and
@@ -284,8 +375,10 @@ button:
   # Who both devices think they are. Sent once at boot anyway; this asks again.
   # 0x01 answers the 16 byte per-device layout - device type, versions,
   # operating hours, connected device types and the last blocking and locking
-  # codes. 0x00 answers the 64 byte appliance layout - dF/dU codes, the full
-  # serial number and the boiler name; see mapping/pcu05_p3_protocol.md.
+  # codes. The 64 byte appliance layout carrying the dF/dU codes, serial number
+  # and boiler name has not been seen from either address on a live PCU-05 P3 -
+  # the component asks both and decodes by reply length; see
+  # mapping/pcu05_p3_protocol.md.
   - platform: template
     name: "Boiler identification"
     entity_category: diagnostic
@@ -353,6 +446,23 @@ button:
 #     turn_off_action:
 #       - lambda: 'id(boiler).set_write_enabled(false);'
 #
+# globals:
+#   # The parameter number behind the dropdown, parsed once when the selection
+#   # changes rather than read out of the select inside the button's lambda.
+#   # `select::Select` does not expose its state the same way across ESPHome
+#   # versions - on 2025.x `.state` is gone and the class is a template - whereas
+#   # the `x` handed to on_value has been stable for years. So what the button
+#   # reads is a plain uint8_t.
+#   #
+#   # Starts at 0 deliberately: 0 is not a parameter this component will write,
+#   # so a Queue pressed before anything has been picked is refused - "p0
+#   # refused: not one of the parameters this component will write" - rather than
+#   # staging whatever the dropdown happened to default to.
+#   - id: write_param_no
+#     type: uint8_t
+#     restore_value: false
+#     initial_value: '0'
+#
 # select:
 #   # The writable list and nothing else - the component refuses every other
 #   # parameter anyway, so a free-text box could only ever produce typos. Each
@@ -377,8 +487,22 @@ button:
 #     id: write_param_sel
 #     optimistic: true
 #     entity_category: config
-#     initial_option: "p33 - DHW hysteresis, cut-in below tank setpoint (2..15)"
+#     # The first option is a placeholder. It parses to 0, which is not a
+#     # writable parameter, so the dropdown opens on "nothing picked" and a Queue
+#     # pressed before you have chosen is refused rather than quietly acting on a
+#     # default.
+#     initial_option: "(nothing selected)"
+#     on_value:
+#       - lambda: |-
+#           // Every option starts "p<N>". Skip the p and take digits until the
+#           // description begins. Done by hand rather than with strtol/atoi so
+#           // this depends on no header the lambda may or may not have.
+#           uint8_t n = 0;
+#           for (size_t i = 1; i < x.size() && x[i] >= '0' && x[i] <= '9'; i++)
+#             n = (uint8_t) (n * 10 + (x[i] - '0'));
+#           id(write_param_no) = n;
 #     options:
+#       - "(nothing selected)"
 #       - "p1 - max CH flow temp (20..90)"
 #       - "p2 - DHW tank setpoint (40..65)"
 #       - "p3 - boiler controls, CH/DHW on/off (0..3)"
@@ -432,11 +556,7 @@ button:
 #     entity_category: config
 #     on_press:
 #       - lambda: |-
-#           // Every option starts "p<N>". Skip the p, and strtol stops at the
-#           // first non-digit, which is the rest of the line.
-#           const std::string &sel = id(write_param_sel).state;
-#           id(boiler).queue_param((uint8_t) strtol(sel.c_str() + 1, nullptr, 10),
-#                                  (int) id(write_value).state);
+#           id(boiler).queue_param(id(write_param_no), (int) id(write_value).state);
 #
 #   # Everything staged, in one transaction. Refused unless the write enable
 #   # switch is on; the boiler is not required to be idle. The queue survives a
