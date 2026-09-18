@@ -2338,7 +2338,6 @@ void Dietrich::dump_config() {
     ESP_LOGW(TAG, "  hydro_pressure is not part of the PCU-05 P3 map - verify it against the boiler display");
   }
   LOG_UPDATE_INTERVAL(this);
-  this->check_uart_settings(9600);
 }
 
 }  // namespace dietrich

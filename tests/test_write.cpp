@@ -389,7 +389,6 @@ uint8_t UARTDevice::read() {
   return b;
 }
 void UARTDevice::write_array(const uint8_t *data, size_t len) { g_boiler.on_frame(data, len); }
-bool UARTDevice::check_uart_settings(uint32_t baud_rate) { return true; }
 }  // namespace uart
 }  // namespace esphome
 

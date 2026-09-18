@@ -330,6 +330,21 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+# The PCU-05 P3 service connector runs 9600 8N1 and the component both polls and
+# writes, so it needs a bus of its own with both pins wired. Checked here rather
+# than at runtime: check_uart_settings() is deprecated as of ESPHome 2026.9.0 and
+# goes away in 2027.3.0, and a config error beats a warning in the boot log.
+FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
+    "dietrich",
+    baud_rate=9600,
+    require_tx=True,
+    require_rx=True,
+    data_bits=8,
+    parity="NONE",
+    stop_bits=1,
+)
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
