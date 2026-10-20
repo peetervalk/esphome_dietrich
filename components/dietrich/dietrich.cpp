@@ -728,6 +728,9 @@ void Dietrich::decode_sample_() {
   this->pub_bit_(this->valve_bit0_binary_sensor_, 38, 0, true);
   this->pub_bit_(this->valve_bit2_binary_sensor_, 38, 2, false);
   this->pub_bit_(this->valve_bit3_binary_sensor_, 38, 3, false);
+  // Recom labels bit 3 by position, 0 = CH and 1 = DHW, not off/on
+  if (this->have_(38, 1))
+    this->publish_text_(this->valve_bit3_text_sensor_, (this->d_(38) & 0x08) ? "DHW" : "CH");
   this->pub_bit_(this->valve_bit4_binary_sensor_, 38, 4, false);
   this->pub_bit_(this->valve_bit6_binary_sensor_, 38, 6, false);
 

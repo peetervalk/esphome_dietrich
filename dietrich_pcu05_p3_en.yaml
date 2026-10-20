@@ -214,8 +214,10 @@ dietrich:
     name: "Boiler Gas Valve"
   valve_bit2:
     name: "Boiler Ignition"
-  valve_bit3:
-    name: "Boiler 3-Way Valve"     # 0 = CH, 1 = DHW
+  # The 3-way valve as Recom shows it, "CH" or "DHW". valve_bit3 is the same bit
+  # as a binary_sensor (off = CH, on = DHW) if you would rather trigger on that.
+  valve_bit3_text:
+    name: "Boiler 3-Way Valve"
   valve_bit4:
     name: "Boiler Ext. 3-Way Valve"
   valve_bit6:

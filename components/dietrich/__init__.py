@@ -275,6 +275,9 @@ TEXT_SENSOR_SCHEMAS = {
     "sub_state_text": text_sensor.text_sensor_schema(),
     "lockout_text": text_sensor.text_sensor_schema(),
     "blocking_text": text_sensor.text_sensor_schema(),
+    # valve_bit3 as Recom renders it: "CH" or "DHW" rather than off/on. A
+    # binary_sensor has no device_class that reads that way in Home Assistant.
+    "valve_bit3_text": text_sensor.text_sensor_schema(),
     # The write path reporting back where the writing is done. write_result
     # carries the verdict of whatever the write path last did - "p33 refused:
     # 30 is outside the documented range 2..15", "writing p2=55, p33=6...",

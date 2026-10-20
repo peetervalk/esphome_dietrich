@@ -324,6 +324,10 @@ dietrich:
 
 The code tables are generated from `mapping/pcu05_p3_datamap.json`.
 
+`valve_bit3_text` does the same for the 3-way valve: it publishes `CH` or `DHW`,
+as Recom labels the bit, where the `valve_bit3` binary sensor can only say
+off/on.
+
 ### Bit inversion fix
 
 Every Recom map marks two sample bits `invert="true"`, which this component
@@ -337,15 +341,25 @@ versions did.
 
 ### ESP32 notes
 
-The component works on ESP32 (verified with an ESP32 DevKit-C V4 /
-`variant: esp32`).
+The component works on two ESP32 targets so far:
 
-Put the boiler bus on free pins — `tx_pin: GPIO18`, `rx_pin: GPIO19` is what this
-board runs. ESPHome routes whichever pins you name through the ESP32's UART
-matrix, so there is no need to pick a particular hardware UART or to stay on its
-nominal pins. **Avoid GPIO16 and GPIO17**: they are the obvious-looking choice,
-and they are wired to the PSRAM on WROVER modules, so a config that works on one
-DevKit will fail on another that looks identical.
+- ESP32 DevKit-C V4 (`variant: esp32`)
+- Seeed XIAO ESP32-C3 (`variant: esp32c3`, `framework: esp-idf`)
+
+ESPHome routes whichever pins you name through the ESP32's UART matrix, so there
+is no need to pick a particular hardware UART or to stay on its nominal pins. Put
+the boiler bus on free pins, which differ between the two:
+
+- **ESP32**: `tx_pin: GPIO18`, `rx_pin: GPIO19`. **Avoid GPIO16 and GPIO17**:
+  they are the obvious-looking choice, and they are wired to the PSRAM on WROVER
+  modules, so a config that works on one DevKit will fail on another that looks
+  identical.
+- **ESP32-C3**: `tx_pin: GPIO4`, `rx_pin: GPIO5` (silkscreen D2/D3 on the XIAO).
+  GPIO18/GPIO19 are the C3's USB pins, so the ESP32 choice above does not carry
+  over. Avoid the pins labelled TX/RX (GPIO21/GPIO20): they are UART0, and the
+  ROM bootloader prints its boot log on GPIO21 at 115200 baud straight onto the
+  boiler bus. Keep off the strapping pins GPIO2, GPIO8 and GPIO9 as well. The
+  logger uses the C3's built-in USB serial, so the console needs no UART.
 
 The component source lives in [components/dietrich](components/dietrich). Compared to the
 legacy custom component it also validates every response frame with CRC16

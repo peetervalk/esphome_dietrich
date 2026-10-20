@@ -235,6 +235,7 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   SUB_BINARY_SENSOR(valve_bit0)  // BIT0=Gas Valve (inverted)
   SUB_BINARY_SENSOR(valve_bit2)  // BIT2=Ignition
   SUB_BINARY_SENSOR(valve_bit3)  // BIT3=3-Way valve position
+  SUB_TEXT_SENSOR(valve_bit3)    // the same bit as "CH" / "DHW"
   SUB_BINARY_SENSOR(valve_bit4)  // BIT4=Ext.3-Way Valve
   SUB_BINARY_SENSOR(valve_bit6)  // BIT6=Ext. Gas Valve
 
