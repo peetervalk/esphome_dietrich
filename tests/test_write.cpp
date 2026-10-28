@@ -824,6 +824,23 @@ int main() {
     delete d;
   }
 
+  // -- 5a6. the two DHW post-pump times --------------------------------------
+  {
+    begin("p94 and p107, the DHW post-pump times");
+    auto *d = make();
+    check(!d->queue_param(94, 100), "p94 = 100 refused: its documented max is 99");
+    check(!d->queue_param(107, 0), "p107 = 0 refused: its documented min is 1");
+    check(d->queue_param(94, 99), "p94 staged");
+    // 200 is past int8, so a signed conversion anywhere on the way would show here.
+    check(d->queue_param(107, 200), "p107 staged");
+    check(d->write_queue(), "the write is accepted");
+    pump(*d);
+    check(g_boiler.eeprom[5][13] == 99, "byte 93 took");
+    check(g_boiler.eeprom[6][10] == 200, "byte 106 took, unsigned");
+    check(logged("write successful, verified by read-back: p94=99, p107=200"), "both verified, as typed");
+    delete d;
+  }
+
   // -- 5b. the queue, and what empties it ------------------------------------
   {
     begin("queue handling");

@@ -172,7 +172,7 @@ select:
       - "(nothing selected)"
       - "p1 - max CH flow temp (20..90)"
       - "p2 - DHW tank setpoint (40..65)"
-      # ...twenty-two in all
+      # ...twenty-four in all
 
 button:
   - platform: template
@@ -238,7 +238,7 @@ success. A value the boiler already holds is not written at all, because EEPROM
 endurance is finite, and a queue where every edit is already satisfied sends no
 write frame.
 
-Twenty-two parameters are writable; the table is `PARAM_LIMITS` in
+Twenty-four parameters are writable; the table is `PARAM_LIMITS` in
 [dietrich.cpp](components/dietrich/dietrich.cpp). Two groups need watching.
 
 **p28 and p29** (pump CH min/max) are stored 2–10 and mean 20–100 %, which is how
@@ -253,12 +253,20 @@ which is in tenths of a degree: type `-5` and `param_control_temp_offset` reads
 only ever held ten values, so per cent in steps of 10 threw nothing away, whereas
 whole degrees here would turn 201 usable settings into 21.
 
-**p73, p85, p86, p88, p105 and p106** — six in all — sit in the image's upper
-half, so a write to any of them refreshes the CRC at bytes 126–127 rather than the
-one at 62–63. That the upper half is protected the same way is certain, since the
-stored CRC checks out on every dump, but no other writer has been observed
-maintaining it: Recom's parameter screens stop at p44 on this board and its EEPROM
-menu is greyed out.
+**p73, p85, p86, p88, p94, p105, p106 and p107** — eight in all — sit in the
+image's upper half, so a write to any of them refreshes the CRC at bytes 126–127
+rather than the one at 62–63. That the upper half is protected the same way is
+certain, since the stored CRC checks out on every dump, but no other writer has
+been observed maintaining it: Recom's parameter screens stop at p44 on this board
+and its EEPROM menu is greyed out.
+
+**p94 and p107** are both *Post pump time DHW* in Recom, in seconds: how long the
+pump runs after a charge ends, before the 3-way valve goes back to its standby
+position. Which of the two a solo boiler with a calorifier uses is not
+established. On this appliance the pump stops within one 15-second poll of the
+charge ending, which fits either live value (15 and 10), so both are writable.
+Lengthen one, and the next charge's sub-state and pump history say whether it
+was the right one.
 
 Five parameters — p27, p30, p61, p86 and p106 — are stored two's complement. The
 manual puts it as *“Setting value − 256 = Desired value”* and tabulates 226 = −30,

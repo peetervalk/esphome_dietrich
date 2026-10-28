@@ -40,7 +40,9 @@ read-modify-write - and, more to the point, the refusals:
 - p28 and p29 are written in the units the manual numbers them in (2..10, not
   20..100 %), and a percentage typed in by mistake is refused rather than stored
 - a write to p73 or p105 lands in the image's **upper** half and refreshes the
-  CRC at bytes 126..127 rather than the one at 62..63
+  CRC at bytes 126..127 rather than the one at 62..63, and so does one to the DHW
+  post-pump times p94 and p107 - p107 written as 200, past int8, and stored
+  unsigned
 - several queued edits ride in **one** transaction and cost exactly what one
   edit does: eight block writes, one unlock pair, one EEPROM cycle
 - queueing a parameter twice replaces its value rather than staging two edits

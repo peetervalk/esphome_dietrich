@@ -519,7 +519,7 @@ button:
 #   # a newer component therefore produces a refusal with a reason, never a bad
 #   # write.
 #   #
-#   # * marks the six that live in the image's upper half. That half carries its
+#   # * marks the eight that live in the image's upper half. That half carries its
 #   #   own CRC at image bytes 126..127, which this component maintains, but no
 #   #   other writer has been seen maintaining it - Recom's parameter screens stop
 #   #   at p44 on this board and its EEPROM menu is greyed out. Writing one of
@@ -566,8 +566,10 @@ button:
 #       - "p85 - hysteresis warming up, DHW comfort (0..20) *"
 #       - "p86 - offset warming up, DHW comfort (-30..20) *"
 #       - "p88 - DHW hysteresis, combi/flow-through only (1..10) *"
+#       - "p94 - DHW post-pump time, seconds (1..99) *"
 #       - "p105 - tank switch-off offset (0..10) *"
 #       - "p106 - DHW pump switch-on delay (-20..20) *"
+#       - "p107 - DHW post-pump time, seconds (1..255) *"
 #
 # number:
 #   # `number` rather than `text` so Home Assistant itself will not hand over

@@ -683,8 +683,8 @@ whole 2 KB — is greyed out. So Recom cannot be driven into the upper half at a
 That p17–p44 is one screen is worth noting on its own: p33 and p2 came from different
 menu levels and produced identical frames, so the levels are Recom's, not the board's.
 
-Four parameters on this component's writable list live there — p73, p85, p88 and p105 —
-and a write to any of them exercises the inferred rule. Writing one and watching for
+Eight parameters on this component's writable list live there — p73, p85, p86, p88,
+p94, p105, p106 and p107 — and a write to any of them exercises the inferred rule. Writing one and watching for
 `Blocking 0` is the only experiment that can settle it.
 
 #### There is no factory level on the wire

@@ -229,7 +229,7 @@ static const ParamLimit PARAM_LIMITS[] = {
     // whole units, so there is no way to accept -0.5 without losing the rest.
     {61, 60, -100, 100},  // Offset control temp, tenths of a degree
     {86, 85, -30, 20},  // Offset when warming up for DHW comfort
-    // The five below, and p86 just above, sit in the image's *upper* half - six
+    // The seven below, and p86 just above, sit in the image's *upper* half - eight
     // in all - so a write to any of them refreshes the CRC at image bytes
     // 126..127 rather than the one at image bytes 62..63. Image bytes: the sample
     // frame's 62 and 63 are the service mode flags and have nothing to do with
@@ -242,8 +242,15 @@ static const ParamLimit PARAM_LIMITS[] = {
     {73, 72, 1, 10},    // Hysteresis CH
     {85, 84, 0, 20},    // Hysteresis warming up (DHW comfort)
     {88, 87, 1, 10},    // Hysteresis DHW - combi/flow-through only
+    // p94 and p107 are both "Post pump time DHW" in Recom, both in seconds: the
+    // pump's run after a charge, before the 3-way valve returns to standby. Which
+    // of the two a solo boiler with a calorifier runs on is not established - the
+    // pump stops within 15 s of a charge ending here, which fits either live value
+    // (15 and 10) - so both are writable and the boiler gets to answer.
+    {94, 93, 1, 99},    // Post pump time DHW, seconds
     {105, 104, 0, 10},  // Offset calorifier - switch-off offset, tank sensor
     {106, 105, -20, 20},  // DHW pump switch-on delay against the boiler pump, signed
+    {107, 106, 1, 255},   // Post pump time DHW, seconds - the only range past 127
 };
 static const size_t PARAM_LIMITS_LEN = sizeof(PARAM_LIMITS) / sizeof(PARAM_LIMITS[0]);
 
