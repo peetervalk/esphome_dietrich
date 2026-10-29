@@ -242,12 +242,12 @@ static const ParamLimit PARAM_LIMITS[] = {
     {73, 72, 1, 10},    // Hysteresis CH
     {85, 84, 0, 20},    // Hysteresis warming up (DHW comfort)
     {88, 87, 1, 10},    // Hysteresis DHW - combi/flow-through only
-    // p94 and p107 are both "Post pump time DHW" in Recom, both in seconds: the
-    // pump's run after a charge, before the 3-way valve returns to standby. Which
-    // of the two a solo boiler with a calorifier runs on is not established - the
-    // pump stops within 15 s of a charge ending here, which fits either live value
-    // (15 and 10) - so both are writable and the boiler gets to answer.
-    {94, 93, 1, 99},    // Post pump time DHW, seconds
+    // p94 and p107 are both "Post pump time DHW" in Recom, both in seconds. p94 is
+    // the one a solo boiler with a 3-way valve runs on: at 99 the board holds the
+    // valve on DHW and the pump on for ~90 s after a charge, as substatus 60
+    // (2026-10-29). p107 = 120 changed nothing there, so it most likely times a
+    // separate calorifier pump, paired with p106. It stays writable regardless.
+    {94, 93, 1, 99},    // Post pump time DHW, seconds - the 3-way valve post-run
     {105, 104, 0, 10},  // Offset calorifier - switch-off offset, tank sensor
     {106, 105, -20, 20},  // DHW pump switch-on delay against the boiler pump, signed
     {107, 106, 1, 255},   // Post pump time DHW, seconds - the only range past 127
@@ -998,7 +998,8 @@ bool Dietrich::want_params_() const {
          this->param_pump_ch_max_sensor_ != nullptr || this->param_frost_protect_outside_sensor_ != nullptr ||
          this->param_dhw_setpoint_raise_sensor_ != nullptr || this->param_dhw_hysteresis_sensor_ != nullptr ||
          this->param_control_temp_offset_sensor_ != nullptr ||
-         this->param_ch_hysteresis_sensor_ != nullptr || this->param_calorifier_offset_sensor_ != nullptr;
+         this->param_ch_hysteresis_sensor_ != nullptr || this->param_dhw_post_pump_sensor_ != nullptr ||
+         this->param_calorifier_offset_sensor_ != nullptr;
 }
 
 void Dietrich::decode_params_() {
@@ -1023,6 +1024,7 @@ void Dietrich::decode_params_() {
   // PARAM_LIMITS for why that asymmetry is the lesser evil.
   this->pub_param_s8_(this->param_control_temp_offset_sensor_, 60, 0.1f);  // p61, stored /10 C
   this->pub_param_(this->param_ch_hysteresis_sensor_, 72, 1.0f);      // p73
+  this->pub_param_(this->param_dhw_post_pump_sensor_, 93, 1.0f);      // p94
   this->pub_param_(this->param_calorifier_offset_sensor_, 104, 1.0f); // p105
 }
 

@@ -260,13 +260,15 @@ certain, since the stored CRC checks out on every dump, but no other writer has
 been observed maintaining it: Recom's parameter screens stop at p44 on this board
 and its EEPROM menu is greyed out.
 
-**p94 and p107** are both *Post pump time DHW* in Recom, in seconds: how long the
-pump runs after a charge ends, before the 3-way valve goes back to its standby
-position. Which of the two a solo boiler with a calorifier uses is not
-established. On this appliance the pump stops within one 15-second poll of the
-charge ending, which fits either live value (15 and 10), so both are writable.
-Lengthen one, and the next charge's sub-state and pump history say whether it
-was the right one.
+**p94 and p107** are both *Post pump time DHW* in Recom, in seconds. **p94** is
+the one a solo boiler with a 3-way valve uses: how long the pump keeps running
+with the valve on DHW after a charge, before the valve goes back to its standby
+position. Raised from 15 to its maximum of 99, the board shows ~90 s of
+*Pump post running* (substatus 60) after the burner stops, and the heat left in
+the boiler goes to the tank instead of standing in the heat exchanger. p107 set
+to 120 changed nothing on the same appliance; it most likely times a separate
+calorifier pump, paired with p106. Both remain writable, and `param_dhw_post_pump`
+reads p94 back.
 
 Five parameters — p27, p30, p61, p86 and p106 — are stored two's complement. The
 manual puts it as *“Setting value − 256 = Desired value”* and tabulates 226 = −30,

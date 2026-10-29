@@ -14,6 +14,7 @@ from esphome.const import (
     UNIT_MINUTE,
     UNIT_PERCENT,
     UNIT_REVOLUTIONS_PER_MINUTE,
+    UNIT_SECOND,
 )
 
 CODEOWNERS = ["@peetervalk"]
@@ -118,6 +119,13 @@ def _param_percent_schema():
 def _param_minutes_schema():
     return sensor.sensor_schema(
         unit_of_measurement=UNIT_MINUTE,
+        accuracy_decimals=0,
+    )
+
+
+def _param_seconds_schema():
+    return sensor.sensor_schema(
+        unit_of_measurement=UNIT_SECOND,
         accuracy_decimals=0,
     )
 
@@ -227,6 +235,7 @@ SENSOR_SCHEMAS = {
     # Upper half of the image (blocks 0x18 and 0x1A). The sweep reads all eight
     # blocks anyway, so these cost no extra requests.
     "param_ch_hysteresis": _param_temp_schema(),  # p73
+    "param_dhw_post_pump": _param_seconds_schema(),  # p94, pump run after a charge
     "param_calorifier_offset": _param_temp_schema(),  # p105
 }
 

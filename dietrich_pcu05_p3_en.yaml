@@ -328,6 +328,10 @@ dietrich:
   # param_calorifier_offset:
   #   name: "P105 DHW tank offset"
   #   entity_category: diagnostic
+  # Seconds the pump keeps running with the 3-way valve on DHW after a charge.
+  # param_dhw_post_pump:
+  #   name: "P94 DHW pump post-run"
+  #   entity_category: diagnostic
   # param_ch_hysteresis:
   #   name: "P73 CH hysteresis"
   #   entity_category: diagnostic

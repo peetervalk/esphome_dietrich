@@ -301,9 +301,10 @@ class Dietrich : public PollingComponent, public uart::UARTDevice {
   // Published in degrees, written in tenths - the one parameter where the two
   // differ. See p61 in PARAM_LIMITS (dietrich.cpp) for why it was left that way.
   SUB_SENSOR(param_control_temp_offset)  // p61, byte 60, signed, stored /10 C
-  // Both live in the image's upper half, so they arrive in blocks 0x18 and 0x1A.
+  // All three live in the image's upper half, so they arrive in blocks 0x18..0x1A.
   // The sweep reads all eight blocks either way, so they cost nothing extra.
   SUB_SENSOR(param_ch_hysteresis)        // p73, byte 72
+  SUB_SENSOR(param_dhw_post_pump)        // p94, byte 93, seconds
   SUB_SENSOR(param_calorifier_offset)    // p105, byte 104
 
   // --- identification -----------------------------------------------------
